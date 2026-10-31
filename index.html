@@ -19,12 +19,12 @@ header{height:78px;display:flex;align-items:center;justify-content:space-between
 <body><div class="access-lock" id="accessLock"><div class="lock-card"><h2>🔒 Đang xác minh tài khoản</h2><p id="accessMessage">Vui lòng mở Mini App từ bot Telegram và chờ kiểm tra điều kiện.</p><a class="btn primary" href="https://t.me/huybuwin" target="_blank" rel="noopener">Liên hệ hỗ trợ</a></div></div><div class="wrap">
 <header><div class="brand"><span class="logo" id="tgAvatar">J</span><span><span class="profile-name" id="tgName">Người dùng Telegram</span><small class="profile-id" id="tgId">Mở Mini App trong Telegram</small></span></div><nav><a href="#home">Trang chủ</a><a href="#products">Sản phẩm</a><a href="https://t.me/huybuwin" target="_blank" rel="noopener">Hỗ trợ</a></nav><button class="history-btn" id="historyBtn">📜 Lịch sử lấy key</button></header>
 <main id="home"><section class="hero"><h1><span class="gradient">Jinny Cheat free key</span></h1><div class="hero-actions"><a class="btn primary" href="#products">Khám phá sản phẩm ↘</a><a class="btn secondary" href="https://t.me/huybuwin" target="_blank" rel="noopener">Liên hệ hỗ trợ</a></div></section>
-<section id="products"><div class="section-head"><div><h2>Sản phẩm nổi bật</h2><p>Chọn gói phù hợp và nhấn “LẤY KEY” để bắt đầu.</p></div><span class="tag">DIGITAL PRODUCTS</span></div><div class="products" id="productGrid"></div></section>
+<section id="products"><div class="section-head"><div><h2>Sản phẩm nổi bật</h2><p>Chọn gói phù hợp và nhấn “LẤY KEY” để bắt đầu.</p></div></div><div class="products" id="productGrid"></div></section>
 <section class="benefits" id="support"><div class="benefit"><b>🛡️　Thông tin rõ ràng<span>Hiển thị gói và giá trước khi đặt mua.</span></b></div><div class="benefit"><b>💬　Hỗ trợ khách hàng<span><a href="https://t.me/huybuwin" target="_blank" rel="noopener">Liên hệ Telegram @huybuwin</a>.</span></b></div><div class="benefit"><b>⚙️　Dễ dàng quản lý<span>Quản lý sản phẩm và kho key trong trang ADM.</span></b></div></section></main>
 <footer><span>© 2026 Jinny Cheat free key. All rights reserved.</span><button class="admin-entry" id="adminEntry" title="Quản trị viên">ADM</button></footer></div>
 
 
-<div class="modal" id="historyModal"><div class="dialog wide"><button class="close" data-close="historyModal">×</button><h3>📜 Lịch sử lấy key</h3><p class="muted">Lịch sử được chia theo từng sản phẩm trên thiết bị này.</p><div id="historyContent" class="key-list"></div></div></div>
+<div class="modal" id="historyModal"><div class="dialog wide"><button class="close" data-close="historyModal">×</button><h3>📜 Lịch sử lấy key</h3><p class="muted">Lịch sử được lưu trên máy chủ và chia theo từng sản phẩm.</p><div id="historyContent" class="key-list"></div></div></div>
 <div class="modal" id="issuedModal"><div class="dialog"><button class="close" data-close="issuedModal">×</button><h3>🎉 Lấy key thành công!</h3><p class="muted" id="issuedProduct"></p><div class="field"><label>KEY CỦA BẠN</label><div id="issuedKey" style="background:#04162a;border:1px solid #2b78ad;border-radius:10px;padding:14px;color:#79dcff;font-family:monospace;overflow-wrap:anywhere;font-weight:800"></div></div><div class="actions"><button class="btn primary" id="copyIssued">SAO CHÉP KEY</button><button class="btn secondary" data-close="issuedModal">ĐÓNG</button></div></div></div>
 <!-- Form yêu cầu lấy key ở phía khách -->
 <div class="modal" id="buyModal"><div class="dialog"><button class="close" data-close="buyModal">×</button><h3>Yêu cầu lấy key</h3><p class="muted" id="buyProduct"></p><div class="field"><label>Telegram hoặc email liên hệ</label><input id="buyerContact" placeholder="Nhập username Telegram / email"></div><div class="actions"><button class="btn secondary" data-close="buyModal">Để sau</button><button class="btn primary" id="sendRequest">GỬI YÊU CẦU</button></div><div class="notice" id="buyNotice"></div></div></div>
@@ -43,156 +43,46 @@ header{height:78px;display:flex;align-items:center;justify-content:space-between
 
 <script>
 'use strict';
-if (window.Telegram?.WebApp) { window.Telegram.WebApp.ready(); window.Telegram.WebApp.expand(); }
-function syncTelegramProfile(){
- const u=window.Telegram?.WebApp?.initDataUnsafe?.user;
- const name=document.getElementById('tgName'), id=document.getElementById('tgId'), avatar=document.getElementById('tgAvatar');
- if(!u){name.textContent='Người dùng Telegram';id.textContent='Hãy mở Mini App từ bot';return}
- name.textContent=[u.first_name,u.last_name].filter(Boolean).join(' ') || (u.username?'@'+u.username:'Người dùng Telegram');
- id.textContent='ID: '+u.id+(u.username?' • @'+u.username:'');
- if(u.photo_url) avatar.innerHTML='<img src="'+String(u.photo_url).replace(/&/g,'&amp;').replace(/"/g,'&quot;')+'" alt="Avatar">';
-}
+const tgApp=window.Telegram?.WebApp;
+if(tgApp){tgApp.ready();tgApp.expand();}
+const initData=()=>tgApp?.initData||'';
+const api=async(path,payload={})=>{const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...payload,initData:initData()})});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.message||'Yêu cầu không thành công');return d};
+function syncTelegramProfile(){const u=tgApp?.initDataUnsafe?.user;const name=document.getElementById('tgName'),id=document.getElementById('tgId'),avatar=document.getElementById('tgAvatar');if(!u){name.textContent='Người dùng Telegram';id.textContent='Hãy mở Mini App trong Telegram';return}name.textContent=[u.first_name,u.last_name].filter(Boolean).join(' ')||(u.username?'@'+u.username:'Người dùng Telegram');id.textContent='ID: '+u.id;if(u.photo_url){const img=document.createElement('img');img.src=u.photo_url;img.alt='Avatar Telegram';avatar.replaceChildren(img)}}
 syncTelegramProfile();
-let accessAllowed=false;
-async function verifyTelegramAccess(){
- const lock=document.getElementById('accessLock'), msg=document.getElementById('accessMessage');
- const initData=window.Telegram?.WebApp?.initData||'';
- if(!initData){msg.textContent='Bạn cần mở Mini App bằng nút trong bot Telegram sau khi xác minh nhóm và đủ 3 lượt mời.';return}
- try{
-  const response=await fetch('/api/access',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({initData})});
-  const data=await response.json();
-  if(response.ok&&data.ok){accessAllowed=true;lock.style.display='none';return}
-  msg.textContent=data.message||'Tài khoản chưa đủ điều kiện sử dụng Mini App.';
- }catch(e){msg.textContent='Không kết nối được máy chủ xác minh. Vui lòng tải lại sau.'}
-}
-verifyTelegramAccess();
-const STORE_KEY='bluekey_store_v2', VISITOR_KEY='jinny_guest_claims_v1';
-const ADMIN_PASSWORD='huydz123';
-const starter=[
-{id:'basic',name:'Key Basic',price:'29.000đ',duration:'7 ngày',desc:'Gói key cơ bản, phù hợp cho nhu cầu sử dụng cá nhân.',image:'',keys:[]},
-{id:'pro',name:'Key Pro',price:'79.000đ',duration:'30 ngày',desc:'Gói nâng cao dành cho người cần thời gian sử dụng dài hơn.',image:'',keys:[]},
-{id:'vip',name:'Key VIP',price:'199.000đ',duration:'90 ngày',desc:'Gói dài hạn với quyền lợi hỗ trợ ưu tiên.',image:'',keys:[]}
-];
+let accessAllowed=false,isAdmin=false,products=[],visitorClaims=[];
+const STORE_KEY='bluekey_store_v2',VISITOR_KEY='jinny_guest_claims_v1';
 function clone(x){return JSON.parse(JSON.stringify(x))}
-function readJSON(k, fallback){try{const v=JSON.parse(localStorage.getItem(k));return v??fallback}catch(e){return fallback}}
-let products=readJSON(STORE_KEY,clone(starter));
-if(!Array.isArray(products))products=clone(starter);
-products=products.map(p=>({...p,keys:Array.isArray(p.keys)?p.keys:[]}));
-let visitorClaims=readJSON(VISITOR_KEY,[]);
-if(!Array.isArray(visitorClaims))visitorClaims=[];
-function saveProducts(){try{localStorage.setItem(STORE_KEY,JSON.stringify(products));return true}catch(e){alert('Không thể lưu dữ liệu. Ảnh có thể quá lớn; hãy chọn ảnh nhỏ hơn.');return false}}
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function makeId(){return 'p'+Date.now().toString(36)+Math.random().toString(36).slice(2,7)}
-function show(id){document.getElementById(id).classList.add('show')}
-function hide(id){document.getElementById(id).classList.remove('show')}
+function show(id){document.getElementById(id).classList.add('show')}function hide(id){document.getElementById(id).classList.remove('show')}
 function toast(id,msg){const n=document.getElementById(id);n.textContent=msg;n.classList.add('show')}
-async function renderHistory(){
- const host=document.getElementById('historyContent');host.innerHTML='<div class="empty">Đang tải lịch sử...</div>';
- let records=visitorClaims.slice().reverse();
- const initData=window.Telegram?.WebApp?.initData||'';
- if(initData){try{const r=await fetch('/api/claim-history',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'list',initData})});const d=await r.json();if(r.ok&&d.ok)records=d.claims||records}catch(e){}}
- if(!records.length){host.innerHTML='<div class="empty">Bạn chưa có lịch sử lấy key.</div>';return}
- const grouped={};records.forEach(x=>{const key=x.productName||'Sản phẩm khác';(grouped[key]??=[]).push(x)});
- host.innerHTML=Object.entries(grouped).map(([name,items])=>`<section class="admin-panel"><b>📦 ${esc(name)}</b>${items.map(x=>`<div class="key-row"><span class="key-value">${esc(x.key)}</span><small>${esc(new Date(x.claimedAt).toLocaleString('vi-VN'))}</small></div>`).join('')}</section>`).join('');
-}
+async function verifyTelegramAccess(){const lock=document.getElementById('accessLock'),msg=document.getElementById('accessMessage');if(!initData()){msg.textContent='Bạn chưa mời đủ 3 người bạn. Hãy quay lại bot và mời thêm bạn bè để mở khóa Mini App nhé!';return}try{const d=await api('/api/access');accessAllowed=true;isAdmin=!!d.admin;lock.style.display='none';if(isAdmin)document.getElementById('adminEntry').style.display='inline-block';await loadProducts()}catch(e){msg.textContent=e.message.includes('mời')?'Bạn chưa mời đủ 3 người bạn. Hãy quay lại bot và mời thêm bạn bè để mở khóa Mini App nhé!':e.message}}
+async function loadProducts(){if(isAdmin)await migrateLegacyData();const d=await api('/api/products');products=d.products||[];renderProducts();refreshAdmin()}
+async function migrateLegacyData(){try{const oldProducts=JSON.parse(localStorage.getItem('bluekey_store_v2')||'null');if(Array.isArray(oldProducts)&&oldProducts.length){const d=await api('/api/admin/products',{action:'import_legacy',products:oldProducts});if(d.ok&&!d.already_imported&&((d.imported_keys||0)+(d.imported_products||0)+(d.imported_claims||0)>0))console.info('Đã nhập dữ liệu cũ vào máy chủ:',d)}}catch(e){console.warn('Không thể nhập LocalStorage cũ:',e.message)}}
+function saveProducts(){return true}
+async function renderHistory(){const host=document.getElementById('historyContent');host.innerHTML='<div class="empty">Đang tải lịch sử...</div>';try{const d=await api('/api/claim-history');const records=d.claims||[];if(!records.length){host.innerHTML='<div class="empty">Bạn chưa có lịch sử lấy key.</div>';return}const grouped={};records.forEach(x=>(grouped[x.productName]??=[]).push(x));host.innerHTML=Object.entries(grouped).map(([name,items])=>`<section class="admin-panel"><b>📦 ${esc(name)}</b>${items.map(x=>`<div class="key-row"><span class="key-value">${esc(x.key)}</span><small>${esc(new Date(x.claimedAt+'Z').toLocaleString('vi-VN'))}</small></div>`).join('')}</section>`).join('')}catch(e){host.innerHTML='<div class="empty">Không thể tải lịch sử từ máy chủ.</div>'}}
 document.getElementById('historyBtn').onclick=()=>{show('historyModal');renderHistory()};
-function renderProducts(){
- const grid=document.getElementById('productGrid');
- grid.innerHTML=products.map(p=>`<article class="card"><div class="card-top"><div class="product-icon">${p.image?`<img src="${p.image}" alt="">`:'🔑'}</div><span class="pill">KEY DIGITAL</span></div><h3>${esc(p.name)}</h3><div class="desc">${esc(p.desc)}</div><ul class="features"><li>Thời hạn: ${esc(p.duration)}</li><li>Hỗ trợ kích hoạt</li><li>Hướng dẫn sử dụng</li></ul><div class="price-row"><span class="price">${esc(p.price)} <small>/ key</small></span></div><button class="btn primary" data-action="claim" data-id="${esc(p.id)}">LẤY KEY NGAY</button></article>`).join('')||'<div class="empty">Chưa có sản phẩm.</div>';
-}
-function localDateKey(d=new Date()){return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`}
-function countClaimsToday(){const today=localDateKey();return visitorClaims.filter(x=>x.date===today).length}
-async function claimKey(pid){
- if(!accessAllowed){alert('Bạn cần mở Mini App từ bot và hoàn thành xác minh nhóm + mời đủ 3 người.');return}
- const p=products.find(x=>x.id===pid);if(!p)return;
- const used=countClaimsToday();
- if(used>=2){alert('Thiết bị này đã sử dụng hết giới hạn 2 key hôm nay. Vui lòng quay lại ngày mai.');return}
- if(!Array.isArray(p.keys)||p.keys.length===0){alert('Sản phẩm này hiện đã hết key. Vui lòng quay lại sau.');return}
- const key=String(p.keys[0]);
- if(!confirm(`Bạn muốn lấy ${p.name} với giá ${p.price}? Hôm nay thiết bị này đã lấy ${used}/2 key. Key sẽ được trừ khỏi kho trên trình duyệt này.`))return;
- const oldProducts=clone(products),oldClaims=clone(visitorClaims);
- p.keys.splice(0,1);
- const claimRecord={key,productId:p.id,productName:p.name,claimedAt:new Date().toISOString(),date:localDateKey()};
- visitorClaims.push(claimRecord);
- try{localStorage.setItem(STORE_KEY,JSON.stringify(products));localStorage.setItem(VISITOR_KEY,JSON.stringify(visitorClaims));}
- catch(err){products=oldProducts;visitorClaims=oldClaims;alert('Không thể lưu giao dịch. Dữ liệu đã được hoàn tác, vui lòng thử lại.');return;}
- try{const initData=window.Telegram?.WebApp?.initData||'';if(initData)await fetch('/api/claim-history',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'add',initData,claim:claimRecord})})}catch(e){}
- renderStock();renderProducts();renderAdminProducts();
- document.getElementById('issuedProduct').textContent=p.name+' • '+p.price;
- document.getElementById('issuedKey').textContent=key;show('issuedModal');
-}
+function renderProducts(){const grid=document.getElementById('productGrid');grid.innerHTML=products.map(p=>`<article class="card"><div class="card-top"><div class="product-icon">${p.image?`<img src="${esc(p.image)}" alt="">`:'🔑'}</div><span class="pill">KEY DIGITAL</span></div><h3>${esc(p.name)}</h3><div class="desc">${esc(p.desc)}</div><ul class="features"><li>Thời hạn: ${esc(p.duration)}</li><li>Hỗ trợ kích hoạt</li><li>Còn ${Number(p.stock||0)} key trong kho</li></ul><div class="price-row"><span class="price">${esc(p.price)} <small>/ key</small></span></div><button class="btn primary" data-action="claim" data-id="${esc(p.id)}">LẤY KEY NGAY</button></article>`).join('')||'<div class="empty">Chưa có sản phẩm.</div>'}
+async function claimKey(pid){if(!accessAllowed){alert('Bạn cần xác minh trong bot trước khi sử dụng Mini App.');return}const p=products.find(x=>x.id===pid);if(!p)return;if(!confirm(`Bạn muốn lấy ${p.name} với giá ${p.price}?`))return;try{const d=await api('/api/claim',{productId:pid});document.getElementById('issuedProduct').textContent=d.productName+' • '+d.price;document.getElementById('issuedKey').textContent=d.key;show('issuedModal');await loadProducts()}catch(e){alert(e.message)}}
 async function copyText(value){try{await navigator.clipboard.writeText(value);alert('Đã sao chép key!')}catch(e){const t=document.createElement('textarea');t.value=value;document.body.appendChild(t);t.select();document.execCommand('copy');t.remove();alert('Đã sao chép key!')}}
-document.addEventListener('click',e=>{
- const close=e.target.closest('[data-close]');if(close){hide(close.dataset.close);return}
- const action=e.target.closest('[data-action]');if(!action)return;
- if(action.dataset.action==='claim')claimKey(action.dataset.id);
- if(action.dataset.action==='delete-key')deleteKey(action.dataset.pid,Number(action.dataset.index));
- if(action.dataset.action==='edit-product')editProduct(action.dataset.id);
- if(action.dataset.action==='remove-product')removeProduct(action.dataset.id);
- if(action.dataset.action==='copy')copyText(decodeURIComponent(action.dataset.key));
-});
-document.querySelectorAll('.modal').forEach(m=>m.addEventListener('click',e=>{if(e.target===m)hide(m.id)}));
-document.getElementById('copyIssued').onclick=()=>copyText(document.getElementById('issuedKey').textContent);
-document.getElementById('adminEntry').onclick=()=>{document.getElementById('adminPassword').value='';document.getElementById('loginNotice').classList.remove('show');show('loginModal')};
-function loginAdmin(){const n=document.getElementById('loginNotice');if(document.getElementById('adminPassword').value===ADMIN_PASSWORD){hide('loginModal');openAdmin()}else toast('loginNotice','Mật khẩu không đúng.')}
+document.addEventListener('click',e=>{const close=e.target.closest('[data-close]');if(close){hide(close.dataset.close);return}const action=e.target.closest('[data-action]');if(!action)return;if(action.dataset.action==='claim')claimKey(action.dataset.id)});
+document.querySelectorAll('.modal').forEach(m=>m.addEventListener('click',e=>{if(e.target===m)hide(m.id)}));document.getElementById('copyIssued').onclick=()=>copyText(document.getElementById('issuedKey').textContent);
+document.getElementById('adminEntry').onclick=()=>{if(!isAdmin){alert('Tài khoản Telegram này không có quyền quản trị.');return}openAdmin()};
+function loginAdmin(){if(!isAdmin){toast('loginNotice','Chỉ ADMIN_IDS được phép quản trị.');return}hide('loginModal');openAdmin()}
 document.getElementById('loginBtn').onclick=loginAdmin;document.getElementById('adminPassword').addEventListener('keydown',e=>{if(e.key==='Enter')loginAdmin()});
-function openAdmin(){refreshAdmin();show('adminModal')}
+function openAdmin(){if(!isAdmin)return;refreshAdmin();show('adminModal')}
 document.getElementById('adminClose').onclick=()=>hide('adminModal');document.getElementById('logoutBtn').onclick=()=>hide('adminModal');
 document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>{document.querySelectorAll('[data-tab]').forEach(x=>x.classList.toggle('active',x===b));document.getElementById('stockPanel').hidden=b.dataset.tab!=='stock';document.getElementById('productsPanel').hidden=b.dataset.tab!=='products';if(b.dataset.tab==='products')renderAdminProducts()});
 function refreshAdmin(){const s=document.getElementById('stockProduct');s.innerHTML=products.map(p=>`<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');renderStock();renderAdminProducts()}
 document.getElementById('stockProduct').onchange=renderStock;
-function renderStock(){
- const p=products.find(x=>x.id===document.getElementById('stockProduct').value)||products[0],list=document.getElementById('keyList');
- if(!p){list.innerHTML='<div class="empty">Chưa có sản phẩm.</div>';document.getElementById('stockSummary').textContent='';return}
- document.getElementById('stockSummary').textContent=`${p.name}: ${p.keys.length} key trong kho`;
- list.replaceChildren();
- if(!p.keys.length){list.innerHTML='<div class="empty">Kho key của sản phẩm này đang trống.</div>';return}
- p.keys.forEach((key)=>{
-   const row=document.createElement('div');row.className='key-row';
-   const value=document.createElement('span');value.className='key-value';value.textContent=key;
-   const del=document.createElement('button');del.type='button';del.className='btn danger';del.textContent='XÓA';
-   del.addEventListener('click',()=>deleteKey(p.id,key));
-   row.append(value,del);list.append(row);
- });
-}
-document.getElementById('addKey').onclick=()=>{const p=products.find(x=>x.id===document.getElementById('stockProduct').value),v=document.getElementById('newKey').value.trim();if(!p||!v){toast('stockNotice','Hãy chọn sản phẩm và nhập key.');return}p.keys.push(v);if(saveProducts()){document.getElementById('newKey').value='';toast('stockNotice','Đã thêm key vào kho.');renderStock()}};
-function deleteKey(pid,keyValue){
- const p=products.find(x=>x.id===pid);if(!p)return;
- const index=p.keys.findIndex(k=>k===keyValue);if(index<0){alert('Key này không còn trong kho. Hãy tải lại danh sách.');renderStock();return}
- if(!confirm('Bạn chắc chắn muốn xóa key này khỏi kho?'))return;
- const before=clone(products);p.keys.splice(index,1);
- if(saveProducts()){renderStock();renderAdminProducts();toast('stockNotice','Đã xóa key khỏi kho.')}
- else products=before;
-}
-function renderAdminProducts(){
- const host=document.getElementById('adminProductList');host.replaceChildren();
- if(!products.length){host.innerHTML='<div class="empty">Chưa có sản phẩm. Hãy thêm sản phẩm mới.</div>';return}
- products.forEach(p=>{
-   const row=document.createElement('div');row.className='admin-item';
-   const icon=document.createElement('div');icon.className='product-icon';
-   if(p.image){const img=document.createElement('img');img.src=p.image;img.alt='';icon.append(img)}else icon.textContent='🔑';
-   const info=document.createElement('div');info.className='grow';
-   const name=document.createElement('b');name.textContent=p.name;
-   const meta=document.createElement('small');meta.textContent=`${p.price} • ${p.keys.length} key trong kho`;
-   info.append(name,document.createElement('br'),meta);
-   const edit=document.createElement('button');edit.type='button';edit.className='btn secondary';edit.textContent='SỬA';edit.addEventListener('click',()=>editProduct(p.id));
-   const del=document.createElement('button');del.type='button';del.className='btn danger';del.textContent='XÓA';del.addEventListener('click',()=>removeProduct(p.id));
-   row.append(icon,info,edit,del);host.append(row);
- });
-}
+async function renderStock(){const p=products.find(x=>x.id===document.getElementById('stockProduct').value)||products[0],list=document.getElementById('keyList');list.replaceChildren();if(!p){document.getElementById('stockSummary').textContent='Chưa có sản phẩm.';return}document.getElementById('stockSummary').textContent=`${p.name}: ${p.stock||0} key trong kho`;try{const d=await api('/api/admin/products',{action:'list_keys',product:{id:p.id}});if(!d.keys.length){list.innerHTML='<div class="empty">Kho key của sản phẩm này đang trống.</div>';return}d.keys.forEach(k=>{const row=document.createElement('div');row.className='key-row';const value=document.createElement('span');value.className='key-value';value.textContent=k.key_value;const del=document.createElement('button');del.className='btn danger';del.textContent='XÓA';del.onclick=async()=>{if(!confirm('Xóa key này khỏi kho?'))return;try{await api('/api/admin/products',{action:'delete_key',product:{key_id:k.id}});await loadProducts()}catch(e){alert(e.message)}};row.append(value,del);list.append(row)})}catch(e){list.innerHTML='<div class="empty">Không tải được kho key.</div>'}}
+async function renderAdminProducts(){const host=document.getElementById('adminProductList');host.replaceChildren();products.forEach(p=>{const row=document.createElement('div');row.className='admin-item';const info=document.createElement('div');info.className='grow';const name=document.createElement('b');name.textContent=p.name;const meta=document.createElement('small');meta.textContent=`${p.price} • ${p.stock||0} key trong kho`;info.append(name,document.createElement('br'),meta);const edit=document.createElement('button');edit.className='btn secondary';edit.textContent='SỬA';edit.onclick=()=>openProductForm(p);const del=document.createElement('button');del.className='btn danger';del.textContent='XÓA';del.onclick=()=>removeProduct(p.id);row.append(info,edit,del);host.append(row)})}
 document.getElementById('addProductBtn').onclick=()=>openProductForm();
-function openProductForm(p=null){document.getElementById('productFormTitle').textContent=p?'Sửa sản phẩm':'Thêm sản phẩm';document.getElementById('editProductId').value=p?.id||'';document.getElementById('pName').value=p?.name||'';document.getElementById('pPrice').value=p?.price||'';document.getElementById('pDuration').value=p?.duration||'';document.getElementById('pDesc').value=p?.desc||'';document.getElementById('pImage').value='';document.getElementById('imageHint').textContent=p?.image?'Đã có ảnh. Chọn ảnh khác nếu muốn thay.':'Chưa có ảnh được chọn.';document.getElementById('productNotice').classList.remove('show');show('productModal')}
+function openProductForm(p=null){document.getElementById('productFormTitle').textContent=p?'Sửa sản phẩm':'Thêm sản phẩm';document.getElementById('editProductId').value=p?.id||'';document.getElementById('pName').value=p?.name||'';document.getElementById('pPrice').value=p?.price||'';document.getElementById('pDuration').value=p?.duration||'';document.getElementById('pDesc').value=p?.desc||'';document.getElementById('pImage').value='';document.getElementById('imageHint').textContent=p?.image?'Đã có ảnh. Chọn ảnh khác nếu muốn thay.':'Chưa có ảnh được chọn.';show('productModal')}
+async function removeProduct(pid){const p=products.find(x=>x.id===pid);if(!p||!confirm(`Xóa sản phẩm "${p.name}" cùng toàn bộ key trong kho?`))return;try{await api('/api/admin/products',{action:'delete',product:{id:pid}});await loadProducts()}catch(e){alert(e.message)}}
 function editProduct(pid){const p=products.find(x=>x.id===pid);if(p)openProductForm(p)}
-function removeProduct(pid){const p=products.find(x=>x.id===pid);if(!p||!confirm(`Xóa sản phẩm "${p.name}" cùng toàn bộ key còn trong kho?`))return;products=products.filter(x=>x.id!==pid);if(saveProducts()){refreshAdmin();renderProducts()}}
-document.getElementById('saveProduct').onclick=async()=>{
- const pid=document.getElementById('editProductId').value,name=document.getElementById('pName').value.trim(),price=document.getElementById('pPrice').value.trim(),duration=document.getElementById('pDuration').value.trim(),desc=document.getElementById('pDesc').value.trim(),file=document.getElementById('pImage').files[0],n=document.getElementById('productNotice');
- if(!name||!price){toast('productNotice','Tên sản phẩm và giá là bắt buộc.');return}
- let image='';if(file){if(file.size>900000){toast('productNotice','Ảnh quá lớn (tối đa 900 KB). Hãy chọn ảnh nhỏ hơn.');return}image=await new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result);r.onerror=reject;r.readAsDataURL(file)})}
- const p=products.find(x=>x.id===pid);
- if(p){p.name=name;p.price=price;p.duration=duration||'Không giới hạn';p.desc=desc;p.image=image||p.image}
- else products.push({id:makeId(),name,price,duration:duration||'Không giới hạn',desc,image,keys:[]});
- if(saveProducts()){hide('productModal');refreshAdmin();renderProducts()}
-};
-renderProducts();
+document.getElementById('addKey').onclick=async()=>{const p=products.find(x=>x.id===document.getElementById('stockProduct').value),v=document.getElementById('newKey').value.trim();if(!p||!v){toast('stockNotice','Hãy chọn sản phẩm và nhập key.');return}try{await api('/api/admin/products',{action:'add_key',product:{id:p.id,key:v}});document.getElementById('newKey').value='';toast('stockNotice','Đã thêm key vào kho máy chủ.');await loadProducts()}catch(e){toast('stockNotice',e.message)}};
+document.getElementById('saveProduct').onclick=async()=>{const pid=document.getElementById('editProductId').value,name=document.getElementById('pName').value.trim(),price=document.getElementById('pPrice').value.trim(),duration=document.getElementById('pDuration').value.trim(),desc=document.getElementById('pDesc').value.trim(),file=document.getElementById('pImage').files[0];if(!name||!price){toast('productNotice','Tên sản phẩm và giá là bắt buộc.');return}let image='';if(file){if(file.size>900000){toast('productNotice','Ảnh quá lớn (tối đa 900 KB).');return}image=await new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result);r.onerror=reject;r.readAsDataURL(file)})}try{await api('/api/admin/products',{action:'save',product:{id:pid||makeId(),name,price,duration:duration||'Không giới hạn',desc,image}});hide('productModal');await loadProducts()}catch(e){toast('productNotice',e.message)}};
+verifyTelegramAccess();
 </script>
 </body></html>
