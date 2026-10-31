@@ -9,17 +9,53 @@ app = Flask(__name__, static_folder=None)
 BOT_TOKEN = os.getenv('BOT_TOKEN', '').strip()
 WEBAPP_URL = os.getenv('WEBAPP_URL', '').strip()
 ADMIN_IDS = {int(x.strip()) for x in os.getenv('ADMIN_IDS', '').split(',') if x.strip().isdigit()}
-DB_PATH = os.getenv('DATABASE_PATH', '/var/data/jinny.db')
-if not Path(DB_PATH).parent.exists():
-    DB_PATH = str(BASE_DIR / 'jinny.db')
+DATABASE_URL = os.getenv('DATABASE_URL', '').strip()
+DB_PATH = os.getenv('DATABASE_PATH', str(BASE_DIR / 'jinny.db'))
+DB_BACKEND = 'postgres' if DATABASE_URL else 'sqlite'
 
+class CompatRow(dict):
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            try: return list(self.values())[key]
+            except IndexError: raise KeyError(key)
+        return super().__getitem__(key)
+
+class CompatCursor:
+    def __init__(self, cursor): self._cursor = cursor; self.rowcount = cursor.rowcount
+    def _row(self, row): return CompatRow(row) if row is not None and isinstance(row, dict) else row
+    def fetchone(self): return self._row(self._cursor.fetchone())
+    def fetchall(self): return [self._row(x) for x in self._cursor.fetchall()]
+
+class PostgresCompat:
+    def __init__(self, conn): self.conn = conn
+    def execute(self, sql, params=()):
+        import re
+        sql=sql.strip()
+        if sql.upper().startswith('PRAGMA '): return CompatCursor(self.conn.execute('SELECT 1'))
+        ignored = bool(re.search(r'INSERT\s+OR\s+IGNORE\s+INTO', sql, re.I))
+        sql=re.sub(r'INSERT\s+OR\s+IGNORE\s+INTO', 'INSERT INTO', sql, flags=re.I)
+        if ignored and 'ON CONFLICT' not in sql.upper(): sql += ' ON CONFLICT DO NOTHING'
+        sql=sql.replace('?', '%s')
+        return CompatCursor(self.conn.execute(sql, params or ()))
+    def executescript(self, script):
+        for statement in script.split(';'):
+            if statement.strip(): self.execute(statement)
+    def commit(self): self.conn.commit()
+    def rollback(self): self.conn.rollback()
+    def close(self): self.conn.close()
 
 @contextmanager
 def db():
-    con = sqlite3.connect(DB_PATH, timeout=30)
-    con.row_factory = sqlite3.Row
-    con.execute('PRAGMA foreign_keys=ON')
-    con.execute('PRAGMA busy_timeout=30000')
+    if DB_BACKEND == 'postgres':
+        import psycopg
+        from psycopg.rows import dict_row
+        con = PostgresCompat(psycopg.connect(DATABASE_URL, connect_timeout=12, sslmode='require', row_factory=dict_row, prepare_threshold=None))
+    else:
+        con = sqlite3.connect(DB_PATH, timeout=30)
+        con.row_factory = sqlite3.Row
+        con.execute('PRAGMA foreign_keys=ON')
+        con.execute('PRAGMA busy_timeout=30000')
+        con.execute('PRAGMA synchronous=NORMAL')
     try:
         yield con
         con.commit()
@@ -32,51 +68,78 @@ def db():
 
 def init_db():
     with db() as con:
-        con.executescript('''
-        CREATE TABLE IF NOT EXISTS groups_cfg(id INTEGER PRIMARY KEY AUTOINCREMENT,chat_id TEXT UNIQUE NOT NULL,title TEXT NOT NULL,url TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS users(user_id INTEGER PRIMARY KEY,username TEXT,first_name TEXT,referrer_id INTEGER,qualified INTEGER NOT NULL DEFAULT 0,groups_verified INTEGER NOT NULL DEFAULT 0,unlocked INTEGER NOT NULL DEFAULT 0,created_at TEXT DEFAULT CURRENT_TIMESTAMP);
-        CREATE TABLE IF NOT EXISTS referrals(referrer_id INTEGER NOT NULL,referred_id INTEGER UNIQUE NOT NULL,qualified_at TEXT DEFAULT CURRENT_TIMESTAMP);
-        CREATE TABLE IF NOT EXISTS products(id TEXT PRIMARY KEY,name TEXT NOT NULL,price TEXT NOT NULL,duration TEXT,description TEXT,image TEXT,active INTEGER NOT NULL DEFAULT 1);
-        CREATE TABLE IF NOT EXISTS keys_stock(id INTEGER PRIMARY KEY AUTOINCREMENT,product_id TEXT NOT NULL,key_value TEXT NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP,FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE);
-        CREATE TABLE IF NOT EXISTS claims(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,product_id TEXT,product_name TEXT NOT NULL,key_value TEXT NOT NULL,claimed_at TEXT DEFAULT CURRENT_TIMESTAMP);
-        CREATE TABLE IF NOT EXISTS migration_flags(flag TEXT PRIMARY KEY,completed_at TEXT DEFAULT CURRENT_TIMESTAMP);
-        CREATE INDEX IF NOT EXISTS idx_claim_user ON claims(user_id,id DESC);
-        CREATE INDEX IF NOT EXISTS idx_referrer ON referrals(referrer_id);
-        ''')
-        # Safe additive migration for databases created by earlier ZIP versions.
-        user_cols={r['name'] for r in con.execute('PRAGMA table_info(users)')}
-        for name, declaration in [('groups_verified','INTEGER NOT NULL DEFAULT 0'),('unlocked','INTEGER NOT NULL DEFAULT 0'),('created_at',"TEXT DEFAULT CURRENT_TIMESTAMP")]:
-            if name not in user_cols: con.execute(f'ALTER TABLE users ADD COLUMN {name} {declaration}')
-        try:
-            initial = json.loads(os.getenv('REQUIRED_GROUPS', '[]') or '[]')
-        except (TypeError, ValueError):
-            initial = []
-        if isinstance(initial, list):
+        if DB_BACKEND == 'sqlite': con.execute('PRAGMA journal_mode=WAL')
+        if DB_BACKEND == 'postgres':
+            schema = """
+            CREATE TABLE IF NOT EXISTS groups_cfg(id BIGSERIAL PRIMARY KEY,chat_id TEXT UNIQUE NOT NULL,title TEXT NOT NULL,url TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS optional_links(id BIGSERIAL PRIMARY KEY,title TEXT NOT NULL,url TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS users(user_id BIGINT PRIMARY KEY,username TEXT,first_name TEXT,referrer_id BIGINT,qualified INTEGER NOT NULL DEFAULT 0,groups_verified INTEGER NOT NULL DEFAULT 0,unlocked INTEGER NOT NULL DEFAULT 0,created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP);
+            CREATE TABLE IF NOT EXISTS referrals(referrer_id BIGINT NOT NULL,referred_id BIGINT UNIQUE NOT NULL,qualified_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP);
+            CREATE TABLE IF NOT EXISTS products(id TEXT PRIMARY KEY,name TEXT NOT NULL,price TEXT NOT NULL,duration TEXT,description TEXT,image TEXT,active INTEGER NOT NULL DEFAULT 1);
+            CREATE TABLE IF NOT EXISTS keys_stock(id BIGSERIAL PRIMARY KEY,product_id TEXT NOT NULL,key_value TEXT NOT NULL,created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE);
+            CREATE TABLE IF NOT EXISTS claims(id BIGSERIAL PRIMARY KEY,user_id BIGINT NOT NULL,product_id TEXT,product_name TEXT NOT NULL,key_value TEXT NOT NULL,claimed_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP);
+            CREATE TABLE IF NOT EXISTS migration_flags(flag TEXT PRIMARY KEY,completed_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP);
+            CREATE INDEX IF NOT EXISTS idx_claim_user ON claims(user_id,id DESC);
+            CREATE INDEX IF NOT EXISTS idx_referrer ON referrals(referrer_id);
+            CREATE INDEX IF NOT EXISTS idx_stock_product ON keys_stock(product_id,id);
+            CREATE INDEX IF NOT EXISTS idx_products_active ON products(active);
+            """
+            con.executescript(schema)
+            con.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS groups_verified INTEGER NOT NULL DEFAULT 0')
+            con.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS unlocked INTEGER NOT NULL DEFAULT 0')
+            con.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP')
+        else:
+            con.executescript("""
+            CREATE TABLE IF NOT EXISTS groups_cfg(id INTEGER PRIMARY KEY AUTOINCREMENT,chat_id TEXT UNIQUE NOT NULL,title TEXT NOT NULL,url TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS optional_links(id INTEGER PRIMARY KEY AUTOINCREMENT,title TEXT NOT NULL,url TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS users(user_id INTEGER PRIMARY KEY,username TEXT,first_name TEXT,referrer_id INTEGER,qualified INTEGER NOT NULL DEFAULT 0,groups_verified INTEGER NOT NULL DEFAULT 0,unlocked INTEGER NOT NULL DEFAULT 0,created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+            CREATE TABLE IF NOT EXISTS referrals(referrer_id INTEGER NOT NULL,referred_id INTEGER UNIQUE NOT NULL,qualified_at TEXT DEFAULT CURRENT_TIMESTAMP);
+            CREATE TABLE IF NOT EXISTS products(id TEXT PRIMARY KEY,name TEXT NOT NULL,price TEXT NOT NULL,duration TEXT,description TEXT,image TEXT,active INTEGER NOT NULL DEFAULT 1);
+            CREATE TABLE IF NOT EXISTS keys_stock(id INTEGER PRIMARY KEY AUTOINCREMENT,product_id TEXT NOT NULL,key_value TEXT NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP,FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE);
+            CREATE TABLE IF NOT EXISTS claims(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,product_id TEXT,product_name TEXT NOT NULL,key_value TEXT NOT NULL,claimed_at TEXT DEFAULT CURRENT_TIMESTAMP);
+            CREATE TABLE IF NOT EXISTS migration_flags(flag TEXT PRIMARY KEY,completed_at TEXT DEFAULT CURRENT_TIMESTAMP);
+            CREATE INDEX IF NOT EXISTS idx_claim_user ON claims(user_id,id DESC);
+            CREATE INDEX IF NOT EXISTS idx_referrer ON referrals(referrer_id);
+            CREATE INDEX IF NOT EXISTS idx_stock_product ON keys_stock(product_id,id);
+            CREATE INDEX IF NOT EXISTS idx_products_active ON products(active);
+            """)
+            user_cols={r['name'] for r in con.execute('PRAGMA table_info(users)')}
+            for name, declaration in [('groups_verified','INTEGER NOT NULL DEFAULT 0'),('unlocked','INTEGER NOT NULL DEFAULT 0'),('created_at',"TEXT DEFAULT CURRENT_TIMESTAMP")]:
+                if name not in user_cols: con.execute(f'ALTER TABLE users ADD COLUMN {name} {declaration}')
+        try: initial=json.loads(os.getenv('REQUIRED_GROUPS','[]') or '[]')
+        except (TypeError,ValueError): initial=[]
+        if isinstance(initial,list):
             for g in initial:
-                if isinstance(g, dict) and g.get('chat_id') and g.get('url'):
+                if isinstance(g,dict) and g.get('chat_id') and g.get('url'):
                     con.execute('INSERT OR IGNORE INTO groups_cfg(chat_id,title,url) VALUES(?,?,?)',(str(g['chat_id']),str(g.get('title') or g['chat_id']),str(g['url'])))
-        # Migrate existing browser starter catalogue into DB only when no catalogue exists.
         if con.execute('SELECT COUNT(*) FROM products').fetchone()[0] == 0:
             for p in [
-                {'id':'basic','name':'Key Basic','price':'29.000đ','duration':'7 ngày','description':'Gói key cơ bản, phù hợp cho nhu cầu sử dụng cá nhân.'},
-                {'id':'pro','name':'Key Pro','price':'79.000đ','duration':'30 ngày','description':'Gói nâng cao dành cho người cần thời gian sử dụng dài hơn.'},
-                {'id':'vip','name':'Key VIP','price':'199.000đ','duration':'90 ngày','description':'Gói dài hạn với quyền lợi hỗ trợ ưu tiên.'}]:
+                {'id':'basic','name':'Key Basic','price':'Miễn phí','duration':'','description':'Key hoàn toàn miễn phí 🔥'},
+                {'id':'pro','name':'Key Pro','price':'Miễn phí','duration':'','description':'Key hoàn toàn miễn phí 🔥'},
+                {'id':'vip','name':'Key VIP','price':'Miễn phí','duration':'','description':'Key hoàn toàn miễn phí 🔥'}]:
                 con.execute('INSERT OR IGNORE INTO products(id,name,price,duration,description) VALUES(?,?,?,?,?)',(p['id'],p['name'],p['price'],p['duration'],p['description']))
 
 init_db()
 
-
-def tg(method, payload=None, timeout=20):
-    import urllib.request
-    if not BOT_TOKEN: raise RuntimeError('BOT_TOKEN chưa được cấu hình')
-    req=urllib.request.Request(f'https://api.telegram.org/bot{BOT_TOKEN}/{method}',data=json.dumps(payload or {}).encode(),headers={'Content-Type':'application/json'},method='POST')
-    with urllib.request.urlopen(req,timeout=timeout) as r: data=json.loads(r.read().decode())
-    if not data.get('ok'): raise RuntimeError(data.get('description','Telegram API error'))
-    return data.get('result')
-
-
 def groups():
     with db() as con: return [dict(x) for x in con.execute('SELECT id,chat_id,title,url FROM groups_cfg ORDER BY id')]
+
+def optional_links():
+    with db() as con: return [dict(x) for x in con.execute('SELECT id,title,url FROM optional_links ORDER BY id')]
+
+def valid_public_url(url):
+    from urllib.parse import urlparse
+    try:
+        parsed=urlparse(url.strip())
+        return parsed.scheme in ('https','http') and bool(parsed.netloc)
+    except Exception:
+        return False
+
+def send_optional_links(chat_id):
+    links=optional_links()
+    if not links: return
+    rows=[[{'text':'🔗 '+x['title'],'url':x['url']}] for x in links]
+    tg('sendMessage',{'chat_id':chat_id,'text':'🔗 LIÊN KẾT BOT / NHÓM KHÁC (KHÔNG BẮT BUỘC)\nBạn có thể nhấn để mở liên kết. Các liên kết này không ảnh hưởng đến xác minh nhóm bắt buộc.','reply_markup':{'inline_keyboard':rows}})
 
 
 def upsert_user(user, referrer_id=None):
@@ -126,11 +189,21 @@ def is_member(uid,g):
 
 
 def missing_groups(uid):
+    cfg=groups(); signature=tuple((g['id'],g['chat_id']) for g in cfg); now=time.time()
+    with MEMBER_CACHE_LOCK:
+        cached=MEMBER_CACHE.get((int(uid),signature))
+        if cached and now-cached[0] < 25:
+            missing_ids=set(cached[1]); return [g for g in cfg if g['id'] in missing_ids]
     result=[]
-    for g in groups():
+    for g in cfg:
         try:
             if not is_member(uid,g): result.append(g)
         except Exception: result.append(g)
+    with MEMBER_CACHE_LOCK:
+        MEMBER_CACHE[(int(uid),signature)]=(now,tuple(g['id'] for g in result))
+        # Bound memory when many unique users visit concurrently.
+        if len(MEMBER_CACHE)>5000:
+            for key in list(MEMBER_CACHE)[:1500]: MEMBER_CACHE.pop(key,None)
     return result
 
 
@@ -142,8 +215,7 @@ def qualify_referral(uid):
         inviter=u['referrer_id']
         con.execute('UPDATE users SET qualified=1,groups_verified=1 WHERE user_id=?',(uid,))
         if inviter and inviter != uid:
-            con.execute('INSERT OR IGNORE INTO referrals(referrer_id,referred_id) VALUES(?,?)',(inviter,uid))
-            inserted=con.execute('SELECT changes()').fetchone()[0] == 1
+            inserted=con.execute('INSERT OR IGNORE INTO referrals(referrer_id,referred_id) VALUES(?,?)',(inviter,uid)).rowcount == 1
         if inviter and con.execute('SELECT COUNT(*) FROM referrals WHERE referrer_id=?',(inviter,)).fetchone()[0]>=3:
             con.execute('UPDATE users SET unlocked=1 WHERE user_id=?',(inviter,))
     if inserted:
@@ -186,8 +258,9 @@ def send_referral_gate(chat_id,uid):
 
 def admin_menu(chat_id):
     tg('sendMessage',{'chat_id':chat_id,'text':'🛠 MENU QUẢN TRỊ','reply_markup':{'inline_keyboard':[
-        [{'text':'📋 Quản lý nhóm/kênh','callback_data':'adm_groups'}],
-        [{'text':'➕ Thêm nhóm/kênh','callback_data':'adm_add'}],
+        [{'text':'📋 Quản lý nhóm/kênh bắt buộc','callback_data':'adm_groups'}],
+        [{'text':'➕ Thêm nhóm/kênh bắt buộc','callback_data':'adm_add'}],
+        [{'text':'🔗 Quản lý link bot/nhóm khác (không bắt buộc)','callback_data':'adm_links'}],
         [{'text':'✏️ Sửa nhóm/kênh','callback_data':'adm_edit'}],
         [{'text':'🗑 Xóa nhóm/kênh','callback_data':'adm_del'}],
         [{'text':'📊 Thống kê người dùng','callback_data':'adm_users'}],
@@ -208,7 +281,7 @@ def admin_command(message):
         try:
             with db() as con: con.execute('INSERT INTO groups_cfg(chat_id,title,url) VALUES(?,?,?)',f)
             admin_text(chat,'✅ Đã thêm nhóm/kênh.')
-        except sqlite3.IntegrityError: admin_text(chat,'chat_id đã tồn tại.')
+        except Exception: admin_text(chat,'Không thể thêm nhóm (có thể chat_id đã tồn tại).')
         return True
     if cmd=='/editgroup':
         f=[x.strip() for x in arg.split('|')]
@@ -224,17 +297,54 @@ def admin_command(message):
             admin_text(chat,'🗑 Đã xóa.' if cur.rowcount else 'Không tìm thấy ID.')
         except Exception: admin_text(chat,'Cú pháp: /delgroup ID')
         return True
+    if cmd=='/addlink':
+        f=[x.strip() for x in arg.split('|',1)]
+        if len(f)==1 and valid_public_url(f[0]):
+            title=f[0].rstrip('/').split('/')[-1] or 'Mở liên kết'
+            url=f[0]
+        elif len(f)==2 and f[0] and valid_public_url(f[1]): title,url=f[0],f[1]
+        else:
+            admin_text(chat,'Hãy gửi trực tiếp một link https://t.me/... hoặc dùng /addlink Tên | URL.')
+            return True
+        with db() as con: con.execute('INSERT INTO optional_links(title,url) VALUES(?,?)',(title[:60],url))
+        admin_text(chat,'✅ Đã thêm link. Link này là tùy chọn, không ảnh hưởng xác minh nhóm bắt buộc.')
+        return True
+    if cmd=='/editlink':
+        f=[x.strip() for x in arg.split('|',2)]
+        if len(f)!=3 or not f[1] or not valid_public_url(f[2]):
+            admin_text(chat,'Cú pháp: /editlink ID | Tên nút | https://t.me/luxyffshare')
+            return True
+        try:
+            with db() as con: cur=con.execute('UPDATE optional_links SET title=?,url=? WHERE id=?',(f[1][:60],f[2],int(f[0])))
+            admin_text(chat,'✅ Đã cập nhật liên kết.' if cur.rowcount else 'Không tìm thấy ID liên kết.')
+        except Exception: admin_text(chat,'Dữ liệu không hợp lệ.')
+        return True
+    if cmd=='/dellink':
+        try:
+            with db() as con: cur=con.execute('DELETE FROM optional_links WHERE id=?',(int(arg),))
+            admin_text(chat,'🗑 Đã xóa liên kết.' if cur.rowcount else 'Không tìm thấy ID liên kết.')
+        except Exception: admin_text(chat,'Cú pháp: /dellink ID')
+        return True
     return False
 
 
 def process_update(update):
     m=update.get('message')
-    if m and m.get('chat',{}).get('type')=='private' and m.get('text','').startswith('/'):
-        user=m.get('from',{}); uid=int(user['id']); text=m['text']
-        if admin_command(m): return
-        if text.split()[0].split('@')[0]=='/start':
+    if m and m.get('chat',{}).get('type')=='private':
+        user=m.get('from',{}); uid=int(user['id']); text=m.get('text','').strip()
+        if uid in ADMIN_IDS and uid in PENDING_ADMIN and text and not text.startswith('/'):
+            mode=PENDING_ADMIN.pop(uid)
+            if mode=='add_optional_link':
+                if not valid_public_url(text):
+                    admin_text(m['chat']['id'],'❌ Link không hợp lệ. Hãy gửi link bắt đầu bằng https:// hoặc http://.'); PENDING_ADMIN[uid]=mode; return
+                title=text.rstrip('/').split('/')[-1] or 'Mở liên kết'
+                with db() as con: con.execute('INSERT INTO optional_links(title,url) VALUES(?,?)',(title[:60],text))
+                admin_text(m['chat']['id'],'✅ Đã thêm link thành công!'); return
+        if text.startswith('/') and admin_command(m): return
+        if text.startswith('/') and text.split()[0].split('@')[0]=='/start':
             args=text.split(maxsplit=1); token=args[1] if len(args)>1 else ''; ref=int(token[4:]) if token.startswith('ref_') and token[4:].isdigit() else None
             upsert_user(user,ref)
+            send_optional_links(m['chat']['id'])
             if uid in ADMIN_IDS: send_app_button(m['chat']['id']); return
             if not groups(): admin_text(m['chat']['id'],'⚠️ Chủ bot chưa cấu hình nhóm bắt buộc.'); return
             miss=missing_groups(uid)
@@ -252,7 +362,23 @@ def process_update(update):
         qualify_referral(uid); tg('answerCallbackQuery',{'callback_query_id':c['id'],'text':'Đã xác minh nhóm!'}); send_referral_gate(chat,uid); return
     if uid not in ADMIN_IDS:
         tg('answerCallbackQuery',{'callback_query_id':c['id'],'text':'Bạn không có quyền.' ,'show_alert':True}); return
-    if data=='adm_groups':
+    if data=='adm_links':
+        links=optional_links(); rows=[]
+        for item in links:
+            rows.append([{'text':f"🔗 {item['title']} (ID {item['id']})",'callback_data':f"adm_link_{item['id']}"}])
+        rows.append([{'text':'➕ Thêm link bot/nhóm khác','callback_data':'adm_link_add'}])
+        admin_text(chat,'🔗 QUẢN LÝ LINK BOT / NHÓM KHÁC\nĐây là các link tùy chọn, KHÔNG thuộc danh sách nhóm bắt buộc và không ảnh hưởng xác minh.')
+        tg('sendMessage',{'chat_id':chat,'text':'Danh sách liên kết tùy chọn:','reply_markup':{'inline_keyboard':rows}})
+    elif data=='adm_link_add':
+        PENDING_ADMIN[uid]='add_optional_link'
+        admin_text(chat,'🔗 GỬI LINK BẠN MUỐN THÊM\nHãy gửi trực tiếp link bot/nhóm/kênh, ví dụ:\nhttps://t.me/luxyffshare\nBot sẽ tự tạo nút từ link bạn gửi. Không cần nhập lệnh.')
+    elif data.startswith('adm_link_'):
+        try:
+            lid=int(data.rsplit('_',1)[1]); item=next((x for x in optional_links() if x['id']==lid),None)
+            if item:
+                admin_text(chat,f"ID: {item['id']}\nTên nút: {item['title']}\nLink: {item['url']}\n\nSửa: /editlink {item['id']} | Tên nút | URL\nXóa: /dellink {item['id']}")
+        except Exception: admin_text(chat,'Không tìm thấy liên kết.')
+    elif data=='adm_groups':
         gs=groups(); rows=[]
         for g in gs: rows.append([{'text':f"✏️ {g['title']} (ID {g['id']})",'callback_data':f"adm_show_{g['id']}"},{'text':'🗑 Xóa','callback_data':f"adm_del_{g['id']}"}])
         rows.append([{'text':'➕ Thêm nhóm/kênh','callback_data':'adm_add'}])
@@ -262,14 +388,19 @@ def process_update(update):
         if g: admin_text(chat,f"ID: {g['id']}\nTên: {g['title']}\nChat ID: {g['chat_id']}\nLink: {g['url']}\n\nSửa: /editgroup {g['id']} | chat_id | Tên nhóm | link")
     elif data=='adm_add': admin_text(chat,'Dùng: /addgroup @chat_id | Tên nhóm | https://t.me/link\nBot cần quyền admin để kiểm tra thành viên.')
     elif data=='adm_edit': admin_text(chat,'Dùng: /editgroup ID | chat_id | Tên nhóm | https://t.me/link')
-    elif data=='adm_del': admin_text(chat,'Dùng: /delgroup ID')
+    elif data=='adm_del':
+        gs=groups(); rows=[[{'text':'🗑 '+g['title'],'callback_data':f"adm_del_{g['id']}"}] for g in gs]
+        if not rows: rows=[[{'text':'(Chưa có nhóm/kênh)','callback_data':'adm_groups'}]]
+        rows.append([{'text':'↩️ Quay lại quản trị','callback_data':'adm_back'}])
+        tg('sendMessage',{'chat_id':chat,'text':'Chọn nhóm/kênh muốn xóa. Nhấn một nút là xóa ngay khỏi danh sách bắt buộc:','reply_markup':{'inline_keyboard':rows}})
+    elif data=='adm_back': admin_menu(chat)
     elif data=='adm_users':
         with db() as con: n=con.execute('SELECT COUNT(*) FROM users').fetchone()[0]; unlocked=con.execute('SELECT COUNT(*) FROM users WHERE unlocked=1').fetchone()[0]
         admin_text(chat,f'👥 Tổng người dùng: {n}\n🔓 Đã mở khóa: {unlocked}')
     elif data=='adm_refs':
         with db() as con: n=con.execute('SELECT COUNT(*) FROM referrals').fetchone()[0]; top=con.execute('SELECT referrer_id,COUNT(*) n FROM referrals GROUP BY referrer_id ORDER BY n DESC LIMIT 10').fetchall()
         admin_text(chat,'🎁 Tổng lượt giới thiệu hợp lệ: '+str(n)+'\n'+ '\n'.join(f"{x['referrer_id']}: {x['n']}" for x in top))
-    elif data=='adm_status': admin_text(chat,f'🤖 Bot token: {bool(BOT_TOKEN)}\n🌐 Mini App: {bool(WEBAPP_URL)}\n👥 Nhóm bắt buộc: {len(groups())}')
+    elif data=='adm_status': admin_text(chat,f'🤖 Bot token: {bool(BOT_TOKEN)}\n🌐 Mini App: {bool(WEBAPP_URL)}\n👥 Nhóm bắt buộc: {len(groups())}\n🔗 Link tùy chọn: {len(optional_links())}')
     elif data.startswith('adm_del_'):
         try:
             gid=int(data.rsplit('_',1)[1])
@@ -300,7 +431,7 @@ def home(): return send_from_directory(BASE_DIR,'index.html')
 def health():
     try:
         with db() as con: pc=con.execute('SELECT COUNT(*) FROM products').fetchone()[0]; kc=con.execute('SELECT COUNT(*) FROM keys_stock').fetchone()[0]
-        return jsonify(ok=True,app='Jinny Cheat free key',telegram_bot_configured=bool(BOT_TOKEN),required_groups=len(groups()),products=pc,stock_keys=kc,database=DB_PATH,webhook=False)
+        return jsonify(ok=True,app='Jinny Cheat free key',telegram_bot_configured=bool(BOT_TOKEN),required_groups=len(groups()),products=pc,stock_keys=kc,database=DB_BACKEND,webhook=False)
     except Exception as e: return jsonify(ok=False,error=str(e)),500
 
 @app.post('/api/access')
@@ -315,8 +446,10 @@ def api_products():
     body=request.get_json(silent=True) or {}; user,error=access_check(body.get('initData',''))
     if error: return jsonify(**error[0]),error[1]
     with db() as con:
-        rows=con.execute('SELECT p.*,COUNT(k.id) stock FROM products p LEFT JOIN keys_stock k ON k.product_id=p.id WHERE p.active=1 GROUP BY p.id ORDER BY p.rowid').fetchall()
-        return jsonify(ok=True,products=[{'id':r['id'],'name':r['name'],'price':r['price'],'duration':r['duration'] or 'Không giới hạn','desc':r['description'] or '', 'image':r['image'] or '', 'keys':[], 'stock':r['stock']} for r in rows])
+        admin=int(user['id']) in ADMIN_IDS
+        where='' if admin else 'WHERE p.active=1'
+        rows=con.execute(f'SELECT p.*,COUNT(k.id) stock FROM products p LEFT JOIN keys_stock k ON k.product_id=p.id {where} GROUP BY p.id ORDER BY p.id').fetchall()
+        return jsonify(ok=True,products=[{'id':r['id'],'name':r['name'],'price':r['price'],'duration':r['duration'] or '', 'desc':r['description'] or '', 'image':r['image'] or '', 'keys':[], 'stock':r['stock'],'active':bool(r['active'])} for r in rows])
 
 @app.post('/api/admin/products')
 def api_admin_products():
@@ -327,9 +460,12 @@ def api_admin_products():
     with db() as con:
         if action=='save':
             pid=str(p.get('id') or ('p'+str(int(time.time()*1000))))[:80]
-            if not p.get('name') or not p.get('price'): return jsonify(ok=False,message='Tên và giá là bắt buộc.'),400
-            con.execute('INSERT INTO products(id,name,price,duration,description,image) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,price=excluded.price,duration=excluded.duration,description=excluded.description,image=CASE WHEN excluded.image IS NULL OR excluded.image=\'\' THEN products.image ELSE excluded.image END',(pid,str(p['name'])[:150],str(p['price'])[:80],str(p.get('duration',''))[:80],str(p.get('desc',''))[:1000],str(p.get('image',''))))
+            if not str(p.get('name','')).strip(): return jsonify(ok=False,message='Tên sản phẩm là bắt buộc.'),400
+            con.execute('INSERT INTO products(id,name,price,duration,description,image) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,price=excluded.price,duration=excluded.duration,description=excluded.description,image=CASE WHEN excluded.image IS NULL OR excluded.image=\'\' THEN products.image ELSE excluded.image END',(pid,str(p['name'])[:150],str(p.get('price') or 'Miễn phí')[:80],str(p.get('duration') or '')[:80],str(p.get('desc',''))[:1000],str(p.get('image',''))))
             return jsonify(ok=True,id=pid)
+        if action=='set_active':
+            con.execute('UPDATE products SET active=? WHERE id=?',(1 if p.get('active') else 0,str(p.get('id',''))))
+            return jsonify(ok=True)
         if action=='delete': con.execute('DELETE FROM products WHERE id=?',(str(p.get('id','')),)); return jsonify(ok=True)
         if action=='list_keys':
             rows=con.execute('SELECT id,key_value FROM keys_stock WHERE product_id=? ORDER BY id',(str(p.get('id','')),)).fetchall()
@@ -368,19 +504,20 @@ def api_claim():
     uid=int(user['id']); pid=str(body.get('productId',''))
     if uid not in ADMIN_IDS:
         with db() as con:
-            today=con.execute("SELECT COUNT(*) FROM claims WHERE user_id=? AND date(claimed_at)=date('now')",(uid,)).fetchone()[0]
+            date_sql = 'claimed_at::date=CURRENT_DATE' if DB_BACKEND == 'postgres' else "date(claimed_at)=date('now')"
+            today=con.execute(f'SELECT COUNT(*) FROM claims WHERE user_id=? AND {date_sql}',(uid,)).fetchone()[0]
             if today>=2: return jsonify(ok=False,message='Bạn đã sử dụng hết giới hạn 2 key hôm nay.'),429
     try:
         with db() as con:
-            con.execute('BEGIN IMMEDIATE')
             p=con.execute('SELECT * FROM products WHERE id=? AND active=1',(pid,)).fetchone()
             if not p: return jsonify(ok=False,message='Không tìm thấy sản phẩm.'),404
-            key=con.execute('SELECT id,key_value FROM keys_stock WHERE product_id=? ORDER BY id LIMIT 1',(pid,)).fetchone()
+            lock_sql = ' FOR UPDATE SKIP LOCKED' if DB_BACKEND == 'postgres' else ''
+            key=con.execute('SELECT id,key_value FROM keys_stock WHERE product_id=? ORDER BY id LIMIT 1'+lock_sql,(pid,)).fetchone()
             if not key: return jsonify(ok=False,message='Sản phẩm đã hết key.'),409
             con.execute('DELETE FROM keys_stock WHERE id=?',(key['id'],))
             con.execute('INSERT INTO claims(user_id,product_id,product_name,key_value) VALUES(?,?,?,?)',(uid,pid,p['name'],key['key_value']))
             return jsonify(ok=True,key=key['key_value'],productName=p['name'],price=p['price'])
-    except sqlite3.Error:
+    except Exception:
         app.logger.exception('Claim transaction failed'); return jsonify(ok=False,message='Không thể hoàn tất giao dịch, vui lòng thử lại.'),500
 
 @app.post('/api/claim-history')
