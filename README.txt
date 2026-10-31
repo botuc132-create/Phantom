@@ -6,7 +6,7 @@ Build Command:
 Start Command:
   python run.py
 
-The run.py supervisor starts Gunicorn (main:app) and exactly one bot.py polling worker. The bot removes any old webhook with deleteWebhook before getUpdates polling. Do not deploy another bot worker/service with the same BOT_TOKEN at the same time.
+The run.py supervisor starts Gunicorn (main:app) and exactly one bot.py polling worker. The polling worker processes different users concurrently (six workers), preserves message order for each user, and applies queue back-pressure during bursts. The bot removes any old webhook with deleteWebhook before getUpdates polling. Do not deploy another bot worker/service with the same BOT_TOKEN at the same time.
 
 ENVIRONMENT VARIABLES
 BOT_TOKEN       Required. Token from @BotFather.
@@ -22,7 +22,7 @@ This version supports Supabase PostgreSQL through DATABASE_URL and creates all r
 
 TELEGRAM SETUP
 1. Add the bot as administrator to each required channel/group with permission to inspect members.
-2. Configure each required group with /addgroup @chat_id | Group title | https://t.me/join_link. Private groups should use their numeric -100... chat ID and a valid invite URL.
+2. Admin mở /admin → “Thêm nhóm/kênh bắt buộc” → gửi trực tiếp link công khai dạng https://t.me/ten_nhom. Bot tự lấy chat ID và tên bằng getChat. Bot phải được thêm làm quản trị viên để xác minh thành viên. Link mời riêng tư dạng t.me/+... không thể tự suy ra chat ID chỉ từ link; hãy dùng username công khai của nhóm/kênh.
 3. Set WEBAPP_URL to this service's public HTTPS URL.
 4. Ensure the bot is not running in another polling worker/service. bot.py removes the previous webhook automatically.
 5. Use /start, join all listed groups and press XÁC MINH. Each referred account is counted only after successful group verification. Referral attribution is stored once and cannot be changed later.
@@ -35,7 +35,7 @@ ADMIN COMMANDS (ADMIN_IDS ONLY)
 /addlink Button title | https://t.me/luxyffshare
 /editlink ID | Button title | https://t.me/luxyffshare
 /dellink ID
-The admin menu has a separate optional bot/group link manager. Optional links accept any valid HTTP/HTTPS URL, are shown as their own clickable buttons to users, and are never included in required-group verification or referral qualification. They can be added, edited and deleted independently of required groups. The menu also includes required-group management, user/referral statistics and bot status. Website admin actions are also checked against signed Telegram initData and ADMIN_IDS; a browser-only password is not treated as authorization.
+The admin menu has a separate one-tap “Thêm bot/nhóm bên ngoài” action and optional bot/group link manager. Tap it and send any valid HTTP/HTTPS URL; the bot creates a clickable link automatically. These optional links are never included in required-group verification or referral qualification. Required groups can be deleted from the quick-button list without typing an ID. The menu also includes required-group management, user/referral statistics and bot status. Website admin actions are also checked against signed Telegram initData and ADMIN_IDS; a browser-only password is not treated as authorization.
 
 MINI APP
 The existing visual design is retained. Product catalogue, key stock and claims now use server APIs and the shared database. Claims remove a key atomically on the server, with a maximum of two claims per Telegram account per UTC day (except ADMIN_IDS). Claim history is server-side and grouped by product. Direct access is rejected unless Telegram initData is valid and the user has joined required groups and qualified 3 invited users.

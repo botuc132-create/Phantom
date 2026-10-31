@@ -3,6 +3,29 @@ from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import parse_qsl
 from flask import Flask, jsonify, request, send_from_directory
+import urllib.request, urllib.parse, re
+
+# Bounded in-process caches and pending admin input; database schema is intentionally unchanged.
+MEMBER_CACHE = {}
+MEMBER_CACHE_LOCK = threading.RLock()
+PENDING_ADMIN = {}
+PENDING_ADMIN_LOCK = threading.RLock()
+TELEGRAM_TIMEOUT = 12
+
+def tg(method, params=None, timeout=TELEGRAM_TIMEOUT):
+    if not BOT_TOKEN:
+        raise RuntimeError('BOT_TOKEN chưa được cấu hình')
+    payload = urllib.parse.urlencode(params or {}).encode()
+    req = urllib.request.Request(
+        f'https://api.telegram.org/bot{BOT_TOKEN}/{method}',
+        data=payload,
+        headers={'Content-Type': 'application/x-www-form-urlencoded'}
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        result = json.loads(response.read().decode('utf-8'))
+    if not result.get('ok'):
+        raise RuntimeError(result.get('description', 'Telegram API error'))
+    return result.get('result')
 
 BASE_DIR = Path(__file__).resolve().parent
 app = Flask(__name__, static_folder=None)
@@ -256,11 +279,35 @@ def send_referral_gate(chat_id,uid):
     tg('sendMessage',{'chat_id':chat_id,'text':f'✅ Bạn đã xác minh tham gia nhóm thành công!\n\nĐể mở khóa Mini App, bạn cần mời 3 người bạn mới tham gia bot.\n\n🔗 Link giới thiệu của bạn: {link or "Không lấy được link bot, hãy kiểm tra BOT_TOKEN."}\n📊 Tiến độ: {count}/3 người.\n⏳ Còn thiếu: {3-count} người.'})
 
 
+def add_required_group_from_link(url):
+    """Resolve a public t.me username to a Telegram chat without changing DB schema."""
+    from urllib.parse import urlparse, unquote
+    if not valid_public_url(url):
+        raise ValueError('Link không hợp lệ. Hãy gửi link https://t.me/...')
+    parsed=urlparse(url.strip())
+    host=(parsed.netloc or '').lower().split(':')[0]
+    if host not in ('t.me','www.t.me','telegram.me','www.telegram.me'):
+        raise ValueError('Hãy gửi link Telegram dạng https://t.me/ten_nhom.')
+    path=unquote(parsed.path.strip('/'))
+    if not path or path.startswith('+') or path.startswith('joinchat/'):
+        raise ValueError('Link mời riêng tư không cung cấp chat ID để bot kiểm tra thành viên. Hãy dùng link công khai dạng https://t.me/ten_nhom.')
+    username=path.split('/')[0]
+    if username in ('c', 's') or not re.fullmatch(r'[A-Za-z0-9_]{5,}', username):
+        raise ValueError('Link này không phải link nhóm/kênh công khai có username.')
+    chat=tg('getChat', {'chat_id':'@'+username})
+    chat_id=str(chat.get('id'))
+    title=chat.get('title') or chat.get('username') or username
+    with db() as con:
+        con.execute('INSERT INTO groups_cfg(chat_id,title,url) VALUES(?,?,?) ON CONFLICT(chat_id) DO UPDATE SET title=excluded.title,url=excluded.url',
+                    (chat_id,title,url.strip()))
+    return title, chat_id
+
 def admin_menu(chat_id):
     tg('sendMessage',{'chat_id':chat_id,'text':'🛠 MENU QUẢN TRỊ','reply_markup':{'inline_keyboard':[
         [{'text':'📋 Quản lý nhóm/kênh bắt buộc','callback_data':'adm_groups'}],
         [{'text':'➕ Thêm nhóm/kênh bắt buộc','callback_data':'adm_add'}],
         [{'text':'🔗 Quản lý link bot/nhóm khác (không bắt buộc)','callback_data':'adm_links'}],
+        [{'text':'➕ Thêm bot/nhóm bên ngoài','callback_data':'adm_link_add'}],
         [{'text':'✏️ Sửa nhóm/kênh','callback_data':'adm_edit'}],
         [{'text':'🗑 Xóa nhóm/kênh','callback_data':'adm_del'}],
         [{'text':'📊 Thống kê người dùng','callback_data':'adm_users'}],
@@ -334,6 +381,14 @@ def process_update(update):
         user=m.get('from',{}); uid=int(user['id']); text=m.get('text','').strip()
         if uid in ADMIN_IDS and uid in PENDING_ADMIN and text and not text.startswith('/'):
             mode=PENDING_ADMIN.pop(uid)
+            if mode=='add_required_group':
+                try:
+                    title, chat_id=add_required_group_from_link(text)
+                    admin_text(m['chat']['id'],f'✅ Đã thêm nhóm/kênh bắt buộc: {title}\n🆔 Chat ID: {chat_id}\nBot cần có quyền quản trị để xác minh thành viên.')
+                except Exception as exc:
+                    admin_text(m['chat']['id'],f'❌ Không thêm được nhóm/kênh: {exc}\nHãy gửi lại link công khai dạng https://t.me/ten_nhom.')
+                    with PENDING_ADMIN_LOCK: PENDING_ADMIN[uid]=mode
+                return
             if mode=='add_optional_link':
                 if not valid_public_url(text):
                     admin_text(m['chat']['id'],'❌ Link không hợp lệ. Hãy gửi link bắt đầu bằng https:// hoặc http://.'); PENDING_ADMIN[uid]=mode; return
@@ -370,7 +425,7 @@ def process_update(update):
         admin_text(chat,'🔗 QUẢN LÝ LINK BOT / NHÓM KHÁC\nĐây là các link tùy chọn, KHÔNG thuộc danh sách nhóm bắt buộc và không ảnh hưởng xác minh.')
         tg('sendMessage',{'chat_id':chat,'text':'Danh sách liên kết tùy chọn:','reply_markup':{'inline_keyboard':rows}})
     elif data=='adm_link_add':
-        PENDING_ADMIN[uid]='add_optional_link'
+        with PENDING_ADMIN_LOCK: PENDING_ADMIN[uid]='add_optional_link'
         admin_text(chat,'🔗 GỬI LINK BẠN MUỐN THÊM\nHãy gửi trực tiếp link bot/nhóm/kênh, ví dụ:\nhttps://t.me/luxyffshare\nBot sẽ tự tạo nút từ link bạn gửi. Không cần nhập lệnh.')
     elif data.startswith('adm_link_'):
         try:
@@ -386,7 +441,9 @@ def process_update(update):
     elif data.startswith('adm_show_'):
         gid=int(data.rsplit('_',1)[1]); g=next((x for x in groups() if x['id']==gid),None)
         if g: admin_text(chat,f"ID: {g['id']}\nTên: {g['title']}\nChat ID: {g['chat_id']}\nLink: {g['url']}\n\nSửa: /editgroup {g['id']} | chat_id | Tên nhóm | link")
-    elif data=='adm_add': admin_text(chat,'Dùng: /addgroup @chat_id | Tên nhóm | https://t.me/link\nBot cần quyền admin để kiểm tra thành viên.')
+    elif data=='adm_add':
+        with PENDING_ADMIN_LOCK: PENDING_ADMIN[uid]='add_required_group'
+        admin_text(chat,'➕ THÊM NHÓM/KÊNH BẮT BUỘC\nGửi trực tiếp link nhóm hoặc kênh Telegram công khai, ví dụ:\nhttps://t.me/luxyffshare\n\nKhông cần nhập lệnh. Bot tự nhận diện từ link. Hãy cấp quyền quản trị cho bot để kiểm tra thành viên.')
     elif data=='adm_edit': admin_text(chat,'Dùng: /editgroup ID | chat_id | Tên nhóm | https://t.me/link')
     elif data=='adm_del':
         gs=groups(); rows=[[{'text':'🗑 '+g['title'],'callback_data':f"adm_del_{g['id']}"}] for g in gs]
