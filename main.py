@@ -329,7 +329,18 @@ def send_referral_gate(chat_id,uid):
     with db() as con: row=con.execute('SELECT skip_invite FROM users WHERE user_id=?',(uid,)).fetchone()
     if count>=3 or (row and row['skip_invite']): send_app_button(chat_id); return
     link=referral_link(uid)
-    tg('sendMessage',{'chat_id':chat_id,'text':f'✅ Bạn đã xác minh tham gia nhóm thành công!\n\nĐể mở khóa Mini App, bạn cần mời 3 người bạn mới tham gia bot.\n\n🔗 Link giới thiệu của bạn: {link or "Không lấy được link bot, hãy kiểm tra BOT_TOKEN."}\n📊 Tiến độ: {count}/3 người.\n⏳ Còn thiếu: {3-count} người.'})
+    text=f'✅ Bạn đã xác minh tham gia nhóm thành công!\n\nĐể mở khóa Mini App, bạn cần mời 3 người bạn mới tham gia bot.\n\n🔗 Link giới thiệu của bạn:\n{link or "Không lấy được link bot, hãy kiểm tra BOT_TOKEN."}\n\n📊 Tiến độ: {count}/3 người.\n⏳ Còn thiếu: {3-count} người.'
+    params={'chat_id':chat_id,'text':text}
+    if link:
+        # Telegram's native copy_text button copies the exact referral URL in one tap.
+        params['reply_markup']={'inline_keyboard':[[{'text':'📋 SAO CHÉP LINK MỜI','copy_text':{'text':link}}]]}
+    try:
+        tg('sendMessage',params)
+    except Exception:
+        # Keep the verification/referral flow usable on older Bot API implementations.
+        if 'reply_markup' not in params: raise
+        params.pop('reply_markup',None)
+        tg('sendMessage',params)
 
 
 def add_required_group_from_link(url):
@@ -746,13 +757,21 @@ def api_claim():
     body=request.get_json(silent=True) or {}; user,error=access_check(body.get('initData',''))
     if error: return jsonify(**error[0]),error[1]
     uid=int(user['id']); pid=str(body.get('productId',''))
-    if uid not in ADMIN_IDS:
-        with db() as con:
-            date_sql = 'claimed_at::date=CURRENT_DATE' if DB_BACKEND == 'postgres' else "date(claimed_at)=date('now')"
-            today=con.execute(f'SELECT COUNT(*) FROM claims WHERE user_id=? AND {date_sql}',(uid,)).fetchone()[0]
-            if today>=2: return jsonify(ok=False,message='Bạn đã sử dụng hết giới hạn 2 key hôm nay.'),429
     try:
         with db() as con:
+            if uid not in ADMIN_IDS:
+                # Rolling quota cycle: after the user receives their second key,
+                # the full 2-key allowance refreshes 24 hours after that second claim.
+                # Checking the two newest claims avoids releasing only one slot at
+                # the 24-hour anniversary of the first claim.
+                if DB_BACKEND == 'postgres':
+                    con.execute('SELECT user_id FROM users WHERE user_id=? FOR UPDATE',(uid,)).fetchone()
+                    recent_pair=con.execute("SELECT COUNT(*) FROM (SELECT claimed_at FROM claims WHERE user_id=? ORDER BY id DESC LIMIT 2) AS last_claims WHERE claimed_at >= CURRENT_TIMESTAMP - INTERVAL '24 hours'",(uid,)).fetchone()[0]
+                else:
+                    con.execute('BEGIN IMMEDIATE')
+                    recent_pair=con.execute("SELECT COUNT(*) FROM (SELECT claimed_at FROM claims WHERE user_id=? ORDER BY id DESC LIMIT 2) AS last_claims WHERE datetime(claimed_at) >= datetime('now','-24 hours')",(uid,)).fetchone()[0]
+                if recent_pair>=2:
+                    return jsonify(ok=False,message='Bạn đã dùng hết 2 key. Bạn sẽ được nhận lại 2 key sau 24 giờ kể từ lần nhận key thứ hai.'),429
             p=con.execute('SELECT * FROM products WHERE id=? AND active=1',(pid,)).fetchone()
             if not p: return jsonify(ok=False,message='Không tìm thấy sản phẩm.'),404
             lock_sql = ' FOR UPDATE SKIP LOCKED' if DB_BACKEND == 'postgres' else ''

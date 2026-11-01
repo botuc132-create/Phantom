@@ -38,7 +38,9 @@ ADMIN COMMANDS (ADMIN_IDS ONLY)
 The admin menu has a separate one-tap “Thêm bot/nhóm bên ngoài” action and optional bot/group link manager. Tap it and send any valid HTTP/HTTPS URL; the bot creates a clickable link automatically. These optional links are never included in required-group verification or referral qualification. Required groups can be deleted from the quick-button list without typing an ID. The menu also includes required-group management, user/referral statistics and bot status. Website admin actions are also checked against signed Telegram initData and ADMIN_IDS; a browser-only password is not treated as authorization.
 
 MINI APP
-The existing visual design is retained. Product catalogue, key stock and claims now use server APIs and the shared database. Claims remove a key atomically on the server, with a maximum of two claims per Telegram account per UTC day (except ADMIN_IDS). Claim history is server-side and grouped by product. Direct access is rejected unless Telegram initData is valid and the user has joined required groups and qualified 3 invited users.
+- On bot startup, the polling worker calls Telegram setChatMenuButton to configure a persistent “Mở Mini App” button beside the message composer in private chats. WEBAPP_URL must be a valid HTTPS Mini App URL.
+- After group verification, the referral URL is shown as plain text and a native “SAO CHÉP LINK MỜI” button is provided when supported by Telegram.
+The existing visual design is retained. Product catalogue, key stock and claims now use server APIs and the shared database. Claims remove a key atomically on the server, with a maximum of two claims per Telegram account in a rolling 24-hour window (except ADMIN_IDS). Claim history is server-side and grouped by product. Direct access is rejected unless Telegram initData is valid and the user has joined required groups and qualified 3 invited users.
 
 IMPORTANT MIGRATION NOTES
 - PostgreSQL is selected automatically when DATABASE_URL is set. The application initializes its tables and indexes on startup; do not create a local data/ directory or jinny.db file for Supabase.

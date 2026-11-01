@@ -1,7 +1,7 @@
 """Telegram long-polling worker. Run exactly one instance alongside the Flask web process."""
 import os, time, logging, urllib.request, urllib.parse, json, threading
 from concurrent.futures import ThreadPoolExecutor
-from main import BOT_TOKEN, process_update, tg
+from main import BOT_TOKEN, WEBAPP_URL, process_update, tg
 logging.basicConfig(level=logging.INFO,format='%(asctime)s %(levelname)s bot: %(message)s')
 log=logging.getLogger('jinny-bot')
 # Different users are processed concurrently while preserving update order per user.
@@ -47,7 +47,9 @@ def enqueue_update(item, pool, slots):
 
 
 def request(method, params=None, timeout=40):
-    data=urllib.parse.urlencode(params or {}).encode()
+    # Telegram Bot API expects structured fields such as menu_button as JSON.
+    encoded={k:(json.dumps(v,ensure_ascii=False,separators=(',',':')) if isinstance(v,(dict,list)) else v) for k,v in (params or {}).items()}
+    data=urllib.parse.urlencode(encoded).encode()
     req=urllib.request.Request(f'https://api.telegram.org/bot{BOT_TOKEN}/{method}',data=data)
     with urllib.request.urlopen(req,timeout=timeout) as r: result=json.loads(r.read().decode())
     if not result.get('ok'): raise RuntimeError(result.get('description','Telegram API error'))
@@ -57,6 +59,16 @@ def main():
     if not BOT_TOKEN: raise SystemExit('BOT_TOKEN chưa được cấu hình')
     # Ensure stale webhook is removed before polling. drop_pending_updates=False preserves queued updates.
     request('deleteWebhook',{'drop_pending_updates':'false'})
+    # Set the persistent Menu Button shown beside the message composer in private chats.
+    # This is bot-wide (chat_id omitted) and is independent of the inline launch button.
+    if WEBAPP_URL:
+        try:
+            request('setChatMenuButton',{'menu_button':{'type':'web_app','text':'Mở Mini App','web_app':{'url':WEBAPP_URL}}})
+            log.info('Telegram Mini App menu button configured.')
+        except Exception:
+            log.exception('Could not configure Telegram Mini App menu button; check WEBAPP_URL and Bot API settings.')
+    else:
+        log.warning('WEBAPP_URL is empty; persistent Mini App menu button was not configured.')
     offset=None
     pool=ThreadPoolExecutor(max_workers=12,thread_name_prefix='tg-update')
     pending_slots=threading.BoundedSemaphore(512)
