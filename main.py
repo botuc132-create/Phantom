@@ -48,6 +48,7 @@ class CompatCursor:
     def _row(self, row): return CompatRow(row) if row is not None and isinstance(row, dict) else row
     def fetchone(self): return self._row(self._cursor.fetchone())
     def fetchall(self): return [self._row(x) for x in self._cursor.fetchall()]
+    def __iter__(self): return iter(self.fetchall())
 
 class PostgresCompat:
     def __init__(self, conn): self.conn = conn
