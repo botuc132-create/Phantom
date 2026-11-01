@@ -15,7 +15,14 @@ TELEGRAM_TIMEOUT = 12
 def tg(method, params=None, timeout=TELEGRAM_TIMEOUT):
     if not BOT_TOKEN:
         raise RuntimeError('BOT_TOKEN chưa được cấu hình')
-    payload = urllib.parse.urlencode(params or {}).encode()
+    # Telegram expects nested Bot API fields (for example reply_markup) as JSON,
+    # not Python's dict/list string representation. Keep scalar parameters unchanged.
+    encoded_params = {
+        key: (json.dumps(value, ensure_ascii=False, separators=(',', ':'))
+              if isinstance(value, (dict, list)) else value)
+        for key, value in (params or {}).items()
+    }
+    payload = urllib.parse.urlencode(encoded_params).encode()
     req = urllib.request.Request(
         f'https://api.telegram.org/bot{BOT_TOKEN}/{method}',
         data=payload,
