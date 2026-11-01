@@ -107,6 +107,8 @@ def init_db():
             CREATE TABLE IF NOT EXISTS keys_stock(id BIGSERIAL PRIMARY KEY,product_id TEXT NOT NULL,key_value TEXT NOT NULL,created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE);
             CREATE TABLE IF NOT EXISTS claims(id BIGSERIAL PRIMARY KEY,user_id BIGINT NOT NULL,product_id TEXT,product_name TEXT NOT NULL,key_value TEXT NOT NULL,claimed_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP);
             CREATE TABLE IF NOT EXISTS migration_flags(flag TEXT PRIMARY KEY,completed_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP);
+            CREATE TABLE IF NOT EXISTS admin_settings(setting TEXT PRIMARY KEY,value TEXT NOT NULL DEFAULT '0');
+            CREATE TABLE IF NOT EXISTS blocked_users(user_id BIGINT PRIMARY KEY,blocked_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP);
             CREATE INDEX IF NOT EXISTS idx_claim_user ON claims(user_id,id DESC);
             CREATE INDEX IF NOT EXISTS idx_referrer ON referrals(referrer_id);
             CREATE INDEX IF NOT EXISTS idx_stock_product ON keys_stock(product_id,id);
@@ -126,6 +128,8 @@ def init_db():
             CREATE TABLE IF NOT EXISTS keys_stock(id INTEGER PRIMARY KEY AUTOINCREMENT,product_id TEXT NOT NULL,key_value TEXT NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP,FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE);
             CREATE TABLE IF NOT EXISTS claims(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER NOT NULL,product_id TEXT,product_name TEXT NOT NULL,key_value TEXT NOT NULL,claimed_at TEXT DEFAULT CURRENT_TIMESTAMP);
             CREATE TABLE IF NOT EXISTS migration_flags(flag TEXT PRIMARY KEY,completed_at TEXT DEFAULT CURRENT_TIMESTAMP);
+            CREATE TABLE IF NOT EXISTS admin_settings(setting TEXT PRIMARY KEY,value TEXT NOT NULL DEFAULT '0');
+            CREATE TABLE IF NOT EXISTS blocked_users(user_id INTEGER PRIMARY KEY,blocked_at TEXT DEFAULT CURRENT_TIMESTAMP);
             CREATE INDEX IF NOT EXISTS idx_claim_user ON claims(user_id,id DESC);
             CREATE INDEX IF NOT EXISTS idx_referrer ON referrals(referrer_id);
             CREATE INDEX IF NOT EXISTS idx_stock_product ON keys_stock(product_id,id);
@@ -154,6 +158,34 @@ def groups():
 
 def optional_links():
     with db() as con: return [dict(x) for x in con.execute('SELECT id,title,url FROM optional_links ORDER BY id')]
+
+def maintenance_enabled():
+    with db() as con:
+        row=con.execute("SELECT value FROM admin_settings WHERE setting='maintenance'").fetchone()
+    return bool(row and str(row['value'])=='1')
+
+def is_blocked(uid):
+    with db() as con:
+        return bool(con.execute('SELECT 1 FROM blocked_users WHERE user_id=?',(int(uid),)).fetchone())
+
+def broadcast_worker(text, admin_chat):
+    with db() as con: ids=[int(x['user_id']) for x in con.execute('SELECT user_id FROM users ORDER BY user_id').fetchall()]
+    sent=failed=0
+    for uid in ids:
+        delivered=False
+        for attempt in range(4):
+            try:
+                tg('sendMessage',{'chat_id':uid,'text':text},timeout=8); delivered=True; break
+            except Exception as exc:
+                # Telegram may briefly rate-limit broadcasts; honor its retry_after hint.
+                match=re.search(r'retry after\s+(\d+)',str(exc),re.I)
+                if match and attempt<3: time.sleep(min(int(match.group(1)),30)); continue
+                break
+        if delivered: sent+=1
+        else: failed+=1
+        time.sleep(0.05)  # Keep below Telegram's private-chat broadcast rate.
+    try: admin_text(admin_chat,f'📣 Hoàn tất thông báo.\n✅ Gửi thành công: {sent}\n⚠️ Không gửi được: {failed}\n👥 Tổng: {len(ids)}')
+    except Exception: pass
 
 def valid_public_url(url):
     from urllib.parse import urlparse
@@ -309,14 +341,18 @@ def add_required_group_from_link(url):
 
 def admin_menu(chat_id):
     tg('sendMessage',{'chat_id':chat_id,'text':'🛠 MENU QUẢN TRỊ','reply_markup':{'inline_keyboard':[
-        [{'text':'📋 Quản lý nhóm/kênh bắt buộc','callback_data':'adm_groups'}],
-        [{'text':'➕ Thêm nhóm/kênh bắt buộc','callback_data':'adm_add'}],
+        [{'text':'📋 Quản lý nhóm/kênh','callback_data':'adm_groups'}],
+        [{'text':'➕ Thêm nhóm/kênh','callback_data':'adm_add'}],
         [{'text':'🔗 Quản lý link bot/nhóm khác (không bắt buộc)','callback_data':'adm_links'}],
         [{'text':'➕ Thêm bot/nhóm bên ngoài','callback_data':'adm_link_add'}],
         [{'text':'✏️ Sửa nhóm/kênh','callback_data':'adm_edit'}],
         [{'text':'🗑 Xóa nhóm/kênh','callback_data':'adm_del'}],
         [{'text':'📊 Thống kê người dùng','callback_data':'adm_users'}],
         [{'text':'🎁 Thống kê giới thiệu','callback_data':'adm_refs'}],
+        [{'text':'📣 Thông báo tất cả người dùng','callback_data':'adm_broadcast'}],
+        [{'text':'🔒 Khóa tài khoản','callback_data':'adm_lock'}],
+        [{'text':'👥 Danh sách người dùng','callback_data':'adm_user_list'}],
+        [{'text':'🛠 Bảo trì bot','callback_data':'adm_maintenance'}],
         [{'text':'🤖 Trạng thái bot','callback_data':'adm_status'}]]}})
 
 
@@ -384,8 +420,13 @@ def process_update(update):
     m=update.get('message')
     if m and m.get('chat',{}).get('type')=='private':
         user=m.get('from',{}); uid=int(user['id']); text=m.get('text','').strip()
+        if uid not in ADMIN_IDS and maintenance_enabled():
+            admin_text(m['chat']['id'],'🛠 Bot đang bảo trì, hãy quay lại sau nhé.'); return
+        if uid not in ADMIN_IDS and is_blocked(uid):
+            admin_text(m['chat']['id'],'🔒 Tài khoản của bạn đã bị khóa.'); return
         if uid in ADMIN_IDS and uid in PENDING_ADMIN and text and not text.startswith('/'):
-            mode=PENDING_ADMIN.pop(uid)
+            with PENDING_ADMIN_LOCK: mode=PENDING_ADMIN.pop(uid,None)
+            if not mode: return
             if mode=='add_required_group':
                 try:
                     title, chat_id=add_required_group_from_link(text)
@@ -400,6 +441,19 @@ def process_update(update):
                 title=text.rstrip('/').split('/')[-1] or 'Mở liên kết'
                 with db() as con: con.execute('INSERT INTO optional_links(title,url) VALUES(?,?)',(title[:60],text))
                 admin_text(m['chat']['id'],'✅ Đã thêm link thành công!'); return
+            if mode=='broadcast':
+                if len(text)>4000:
+                    admin_text(m['chat']['id'],'❌ Nội dung quá dài. Vui lòng gửi tối đa 4000 ký tự.'); return
+                admin_text(m['chat']['id'],'📣 Đã nhận nội dung. Bắt đầu gửi thông báo nền, bot vẫn tiếp tục nhận lệnh.')
+                threading.Thread(target=broadcast_worker,args=(text,m['chat']['id']),daemon=True).start(); return
+            if mode=='lock_user':
+                if not text.isdigit():
+                    admin_text(m['chat']['id'],'❌ ID không hợp lệ. Hãy gửi ID dạng số.'); return
+                target=int(text)
+                if target in ADMIN_IDS:
+                    admin_text(m['chat']['id'],'❌ Không thể khóa tài khoản quản trị viên.'); return
+                with db() as con: con.execute('INSERT INTO blocked_users(user_id) VALUES(?) ON CONFLICT(user_id) DO NOTHING',(target,))
+                admin_text(m['chat']['id'],f'🔒 Đã khóa tài khoản ID {target}.'); return
         if text.startswith('/') and admin_command(m): return
         if text.startswith('/') and text.split()[0].split('@')[0]=='/start':
             args=text.split(maxsplit=1); token=args[1] if len(args)>1 else ''; ref=int(token[4:]) if token.startswith('ref_') and token[4:].isdigit() else None
@@ -413,6 +467,10 @@ def process_update(update):
     c=update.get('callback_query')
     if not c: return
     data=c.get('data',''); user=c.get('from',{}); uid=int(user.get('id',0)); msg=c.get('message',{}); chat=msg.get('chat',{}).get('id')
+    if uid not in ADMIN_IDS and maintenance_enabled():
+        tg('answerCallbackQuery',{'callback_query_id':c['id'],'text':'Bot đang bảo trì, hãy quay lại sau nhé.','show_alert':True}); return
+    if uid not in ADMIN_IDS and is_blocked(uid):
+        tg('answerCallbackQuery',{'callback_query_id':c['id'],'text':'Tài khoản của bạn đã bị khóa.','show_alert':True}); return
     if data=='verify':
         upsert_user(user)
         if uid in ADMIN_IDS: tg('answerCallbackQuery',{'callback_query_id':c['id'],'text':'Admin được cấp quyền.'}); send_app_button(chat); return
@@ -462,6 +520,33 @@ def process_update(update):
     elif data=='adm_refs':
         with db() as con: n=con.execute('SELECT COUNT(*) FROM referrals').fetchone()[0]; top=con.execute('SELECT referrer_id,COUNT(*) n FROM referrals GROUP BY referrer_id ORDER BY n DESC LIMIT 10').fetchall()
         admin_text(chat,'🎁 Tổng lượt giới thiệu hợp lệ: '+str(n)+'\n'+ '\n'.join(f"{x['referrer_id']}: {x['n']}" for x in top))
+    elif data=='adm_broadcast':
+        with PENDING_ADMIN_LOCK: PENDING_ADMIN[uid]='broadcast'
+        admin_text(chat,'📣 Hãy gửi nội dung thông báo cho tất cả người dùng. Bot sẽ gửi ở chế độ nền và tự thống kê số gửi thành công/thất bại.')
+    elif data=='adm_lock':
+        with PENDING_ADMIN_LOCK: PENDING_ADMIN[uid]='lock_user'
+        admin_text(chat,'🔒 Hãy gửi ID người dùng cần khóa.')
+    elif data=='adm_user_list' or data.startswith('adm_user_list_'):
+        page=int(data.rsplit('_',1)[1]) if data!='adm_user_list' else 0
+        page=max(0,page)
+        with db() as con:
+            rows=con.execute('SELECT user_id,username,first_name FROM users ORDER BY user_id DESC LIMIT 20 OFFSET ?',(page*20,)).fetchall()
+            total=con.execute('SELECT COUNT(*) FROM users').fetchone()[0]
+        lines=[f"{r['user_id']} · @{r['username']}" if r['username'] else f"{r['user_id']} · {r['first_name'] or 'Người dùng'}" for r in rows]
+        nav=[]
+        if page>0: nav.append({'text':'⬅️ Trước','callback_data':f'adm_user_list_{page-1}'})
+        if (page+1)*20<total: nav.append({'text':'Tiếp ➡️','callback_data':f'adm_user_list_{page+1}'})
+        markup={'inline_keyboard':[nav]} if nav else {'inline_keyboard':[[{'text':'↩️ Quản trị','callback_data':'adm_back'}]]}
+        tg('sendMessage',{'chat_id':chat,'text':f'👥 DANH SÁCH NGƯỜI DÙNG\nTổng: {total} · Trang {page+1}\n\n'+('\n'.join(lines) if lines else 'Chưa có người dùng.'),'reply_markup':markup})
+    elif data=='adm_maintenance':
+        enabled=maintenance_enabled()
+        tg('sendMessage',{'chat_id':chat,'text':'🛠 CHẾ ĐỘ BẢO TRÌ\nTrạng thái: '+('ĐANG BẬT' if enabled else 'ĐANG TẮT'),'reply_markup':{'inline_keyboard':[[{'text':'🔴 TẮT BẢO TRÌ' if enabled else '🟢 BẬT BẢO TRÌ','callback_data':'adm_maintenance_toggle'}],[{'text':'↩️ Quay lại','callback_data':'adm_back'}]]}})
+    elif data=='adm_maintenance_toggle':
+        enabled=not maintenance_enabled()
+        with db() as con: con.execute("INSERT INTO admin_settings(setting,value) VALUES('maintenance',?) ON CONFLICT(setting) DO UPDATE SET value=excluded.value",('1' if enabled else '0',))
+        tg('answerCallbackQuery',{'callback_query_id':c['id'],'text':'Đã bật bảo trì.' if enabled else 'Đã tắt bảo trì.'})
+        # Refresh the toggle screen with the new state.
+        tg('sendMessage',{'chat_id':chat,'text':'🛠 CHẾ ĐỘ BẢO TRÌ\nTrạng thái: '+('ĐANG BẬT' if enabled else 'ĐANG TẮT'),'reply_markup':{'inline_keyboard':[[{'text':'🔴 TẮT BẢO TRÌ' if enabled else '🟢 BẬT BẢO TRÌ','callback_data':'adm_maintenance_toggle'}],[{'text':'↩️ Quay lại','callback_data':'adm_back'}]]}})
     elif data=='adm_status': admin_text(chat,f'🤖 Bot token: {bool(BOT_TOKEN)}\n🌐 Mini App: {bool(WEBAPP_URL)}\n👥 Nhóm bắt buộc: {len(groups())}\n🔗 Link tùy chọn: {len(optional_links())}')
     elif data.startswith('adm_del_'):
         try:
@@ -476,6 +561,10 @@ def access_check(raw):
     user=validate_webapp_init_data(raw)
     if not user or not user.get('id'): return None,({'ok':False,'reason':'invalid_telegram','message':'Hãy mở Mini App từ bot Telegram.'},401)
     uid=int(user['id'])
+    if uid not in ADMIN_IDS and maintenance_enabled():
+        return None,({'ok':False,'reason':'maintenance','message':'🛠 Bot đang bảo trì, hãy quay lại sau nhé.'},503)
+    if uid not in ADMIN_IDS and is_blocked(uid):
+        return None,({'ok':False,'reason':'blocked','message':'🔒 Tài khoản của bạn đã bị khóa.'},403)
     if uid not in ADMIN_IDS:
         with db() as con: row=con.execute('SELECT unlocked FROM users WHERE user_id=?',(uid,)).fetchone()
         if not row: return None,({'ok':False,'reason':'not_started','message':'Bạn chưa xác minh trong bot Telegram.'},403)
