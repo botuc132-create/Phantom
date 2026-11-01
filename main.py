@@ -93,6 +93,10 @@ def init_db():
     with db() as con:
         if DB_BACKEND == 'sqlite': con.execute('PRAGMA journal_mode=WAL')
         if DB_BACKEND == 'postgres':
+            # Serialize schema init across Gunicorn workers and bot.py (they start concurrently);
+            # concurrent CREATE TABLE IF NOT EXISTS with BIGSERIAL races on the *_id_seq name.
+            # Transaction-level lock, released automatically on commit/rollback.
+            con.execute('SELECT pg_advisory_xact_lock(%s)' % 724100001)
             schema = """
             CREATE TABLE IF NOT EXISTS groups_cfg(id BIGSERIAL PRIMARY KEY,chat_id TEXT UNIQUE NOT NULL,title TEXT NOT NULL,url TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS optional_links(id BIGSERIAL PRIMARY KEY,title TEXT NOT NULL,url TEXT NOT NULL);
