@@ -5,7 +5,11 @@ from urllib.parse import parse_qsl
 from flask import Flask, jsonify, request, send_from_directory
 import urllib.request, urllib.parse, re
 
-# Bounded in-process caches and pending admin input; database schema is intentionally unchanged.
+# Bounded caches and per-process API throttling.
+from collections import defaultdict, deque
+from functools import wraps
+API_HITS = defaultdict(deque)
+API_HITS_LOCK = threading.RLock()
 MEMBER_CACHE = {}
 MEMBER_CACHE_LOCK = threading.RLock()
 PENDING_ADMIN = {}
@@ -108,7 +112,7 @@ def init_db():
             schema = """
             CREATE TABLE IF NOT EXISTS groups_cfg(id BIGSERIAL PRIMARY KEY,chat_id TEXT UNIQUE NOT NULL,title TEXT NOT NULL,url TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS optional_links(id BIGSERIAL PRIMARY KEY,title TEXT NOT NULL,url TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS users(user_id BIGINT PRIMARY KEY,username TEXT,first_name TEXT,referrer_id BIGINT,qualified INTEGER NOT NULL DEFAULT 0,groups_verified INTEGER NOT NULL DEFAULT 0,unlocked INTEGER NOT NULL DEFAULT 0,created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP);
+            CREATE TABLE IF NOT EXISTS users(user_id BIGINT PRIMARY KEY,username TEXT,first_name TEXT,referrer_id BIGINT,qualified INTEGER NOT NULL DEFAULT 0,groups_verified INTEGER NOT NULL DEFAULT 0,unlocked INTEGER NOT NULL DEFAULT 0,created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,photo_url TEXT,skip_invite INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS referrals(referrer_id BIGINT NOT NULL,referred_id BIGINT UNIQUE NOT NULL,qualified_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP);
             CREATE TABLE IF NOT EXISTS products(id TEXT PRIMARY KEY,name TEXT NOT NULL,price TEXT NOT NULL,duration TEXT,description TEXT,image TEXT,active INTEGER NOT NULL DEFAULT 1);
             CREATE TABLE IF NOT EXISTS keys_stock(id BIGSERIAL PRIMARY KEY,product_id TEXT NOT NULL,key_value TEXT NOT NULL,created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE);
@@ -118,6 +122,7 @@ def init_db():
             CREATE TABLE IF NOT EXISTS blocked_users(user_id BIGINT PRIMARY KEY,blocked_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP);
             CREATE INDEX IF NOT EXISTS idx_claim_user ON claims(user_id,id DESC);
             CREATE INDEX IF NOT EXISTS idx_referrer ON referrals(referrer_id);
+            CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
             CREATE INDEX IF NOT EXISTS idx_stock_product ON keys_stock(product_id,id);
             CREATE INDEX IF NOT EXISTS idx_products_active ON products(active);
             """
@@ -125,11 +130,13 @@ def init_db():
             con.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS groups_verified INTEGER NOT NULL DEFAULT 0')
             con.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS unlocked INTEGER NOT NULL DEFAULT 0')
             con.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP')
+            con.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS photo_url TEXT')
+            con.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS skip_invite INTEGER NOT NULL DEFAULT 0')
         else:
             con.executescript("""
             CREATE TABLE IF NOT EXISTS groups_cfg(id INTEGER PRIMARY KEY AUTOINCREMENT,chat_id TEXT UNIQUE NOT NULL,title TEXT NOT NULL,url TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS optional_links(id INTEGER PRIMARY KEY AUTOINCREMENT,title TEXT NOT NULL,url TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS users(user_id INTEGER PRIMARY KEY,username TEXT,first_name TEXT,referrer_id INTEGER,qualified INTEGER NOT NULL DEFAULT 0,groups_verified INTEGER NOT NULL DEFAULT 0,unlocked INTEGER NOT NULL DEFAULT 0,created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+            CREATE TABLE IF NOT EXISTS users(user_id INTEGER PRIMARY KEY,username TEXT,first_name TEXT,referrer_id INTEGER,qualified INTEGER NOT NULL DEFAULT 0,groups_verified INTEGER NOT NULL DEFAULT 0,unlocked INTEGER NOT NULL DEFAULT 0,created_at TEXT DEFAULT CURRENT_TIMESTAMP,photo_url TEXT,skip_invite INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS referrals(referrer_id INTEGER NOT NULL,referred_id INTEGER UNIQUE NOT NULL,qualified_at TEXT DEFAULT CURRENT_TIMESTAMP);
             CREATE TABLE IF NOT EXISTS products(id TEXT PRIMARY KEY,name TEXT NOT NULL,price TEXT NOT NULL,duration TEXT,description TEXT,image TEXT,active INTEGER NOT NULL DEFAULT 1);
             CREATE TABLE IF NOT EXISTS keys_stock(id INTEGER PRIMARY KEY AUTOINCREMENT,product_id TEXT NOT NULL,key_value TEXT NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP,FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE);
@@ -139,11 +146,12 @@ def init_db():
             CREATE TABLE IF NOT EXISTS blocked_users(user_id INTEGER PRIMARY KEY,blocked_at TEXT DEFAULT CURRENT_TIMESTAMP);
             CREATE INDEX IF NOT EXISTS idx_claim_user ON claims(user_id,id DESC);
             CREATE INDEX IF NOT EXISTS idx_referrer ON referrals(referrer_id);
+            CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
             CREATE INDEX IF NOT EXISTS idx_stock_product ON keys_stock(product_id,id);
             CREATE INDEX IF NOT EXISTS idx_products_active ON products(active);
             """)
             user_cols={r['name'] for r in con.execute('PRAGMA table_info(users)')}
-            for name, declaration in [('groups_verified','INTEGER NOT NULL DEFAULT 0'),('unlocked','INTEGER NOT NULL DEFAULT 0'),('created_at',"TEXT DEFAULT CURRENT_TIMESTAMP")]:
+            for name, declaration in [('groups_verified','INTEGER NOT NULL DEFAULT 0'),('unlocked','INTEGER NOT NULL DEFAULT 0'),('created_at',"TEXT DEFAULT CURRENT_TIMESTAMP"),('photo_url','TEXT'),('skip_invite','INTEGER NOT NULL DEFAULT 0')]:
                 if name not in user_cols: con.execute(f'ALTER TABLE users ADD COLUMN {name} {declaration}')
         try: initial=json.loads(os.getenv('REQUIRED_GROUPS','[]') or '[]')
         except (TypeError,ValueError): initial=[]
@@ -318,7 +326,8 @@ def send_app_button(chat_id):
 
 def send_referral_gate(chat_id,uid):
     count=referral_count(uid)
-    if count>=3: send_app_button(chat_id); return
+    with db() as con: row=con.execute('SELECT skip_invite FROM users WHERE user_id=?',(uid,)).fetchone()
+    if count>=3 or (row and row['skip_invite']): send_app_button(chat_id); return
     link=referral_link(uid)
     tg('sendMessage',{'chat_id':chat_id,'text':f'✅ Bạn đã xác minh tham gia nhóm thành công!\n\nĐể mở khóa Mini App, bạn cần mời 3 người bạn mới tham gia bot.\n\n🔗 Link giới thiệu của bạn: {link or "Không lấy được link bot, hãy kiểm tra BOT_TOKEN."}\n📊 Tiến độ: {count}/3 người.\n⏳ Còn thiếu: {3-count} người.'})
 
@@ -427,10 +436,10 @@ def process_update(update):
     m=update.get('message')
     if m and m.get('chat',{}).get('type')=='private':
         user=m.get('from',{}); uid=int(user['id']); text=m.get('text','').strip()
-        if uid not in ADMIN_IDS and maintenance_enabled():
-            admin_text(m['chat']['id'],'🛠 Bot đang bảo trì, hãy quay lại sau nhé.'); return
         if uid not in ADMIN_IDS and is_blocked(uid):
             admin_text(m['chat']['id'],'🔒 Tài khoản của bạn đã bị khóa.'); return
+        if uid not in ADMIN_IDS and maintenance_enabled():
+            admin_text(m['chat']['id'],'🛠 Bot đang bảo trì, hãy quay lại sau nhé.'); return
         if uid in ADMIN_IDS and uid in PENDING_ADMIN and text and not text.startswith('/'):
             with PENDING_ADMIN_LOCK: mode=PENDING_ADMIN.pop(uid,None)
             if not mode: return
@@ -474,10 +483,10 @@ def process_update(update):
     c=update.get('callback_query')
     if not c: return
     data=c.get('data',''); user=c.get('from',{}); uid=int(user.get('id',0)); msg=c.get('message',{}); chat=msg.get('chat',{}).get('id')
-    if uid not in ADMIN_IDS and maintenance_enabled():
-        tg('answerCallbackQuery',{'callback_query_id':c['id'],'text':'Bot đang bảo trì, hãy quay lại sau nhé.','show_alert':True}); return
     if uid not in ADMIN_IDS and is_blocked(uid):
         tg('answerCallbackQuery',{'callback_query_id':c['id'],'text':'Tài khoản của bạn đã bị khóa.','show_alert':True}); return
+    if uid not in ADMIN_IDS and maintenance_enabled():
+        tg('answerCallbackQuery',{'callback_query_id':c['id'],'text':'Bot đang bảo trì, hãy quay lại sau nhé.','show_alert':True}); return
     if data=='verify':
         upsert_user(user)
         if uid in ADMIN_IDS: tg('answerCallbackQuery',{'callback_query_id':c['id'],'text':'Admin được cấp quyền.'}); send_app_button(chat); return
@@ -568,20 +577,38 @@ def access_check(raw):
     user=validate_webapp_init_data(raw)
     if not user or not user.get('id'): return None,({'ok':False,'reason':'invalid_telegram','message':'Hãy mở Mini App từ bot Telegram.'},401)
     uid=int(user['id'])
-    if uid not in ADMIN_IDS and maintenance_enabled():
-        return None,({'ok':False,'reason':'maintenance','message':'🛠 Bot đang bảo trì, hãy quay lại sau nhé.'},503)
     if uid not in ADMIN_IDS and is_blocked(uid):
         return None,({'ok':False,'reason':'blocked','message':'🔒 Tài khoản của bạn đã bị khóa.'},403)
+    if uid not in ADMIN_IDS and maintenance_enabled():
+        return None,({'ok':False,'reason':'maintenance','message':'🛠 Bot đang bảo trì, hãy quay lại sau nhé.'},503)
     if uid not in ADMIN_IDS:
-        with db() as con: row=con.execute('SELECT unlocked FROM users WHERE user_id=?',(uid,)).fetchone()
+        with db() as con: row=con.execute('SELECT unlocked,skip_invite FROM users WHERE user_id=?',(uid,)).fetchone()
         if not row: return None,({'ok':False,'reason':'not_started','message':'Bạn chưa xác minh trong bot Telegram.'},403)
         miss=missing_groups(uid)
         if miss: return None,({'ok':False,'reason':'groups','missing':[g['title'] for g in miss],'message':'Bạn chưa tham gia đủ nhóm bắt buộc. Hãy quay lại bot và xác minh.'},403)
         count=referral_count(uid)
-        if count<3: return None,({'ok':False,'reason':'referrals','referral_count':count,'remaining':3-count,'message':'Bạn chưa mời đủ 3 người bạn. Hãy quay lại bot và mời thêm bạn bè để mở khóa Mini App nhé!'},403)
+        if not row['skip_invite'] and count<3: return None,({'ok':False,'reason':'referrals','referral_count':count,'remaining':3-count,'message':'Bạn chưa mời đủ 3 người bạn. Hãy quay lại bot và mời thêm bạn bè để mở khóa Mini App nhé!'},403)
         with db() as con: con.execute('UPDATE users SET unlocked=1 WHERE user_id=?',(uid,))
     return user,None
 
+
+def api_rate_limit(fn):
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        body=request.get_json(silent=True) or {}; user=validate_webapp_init_data(body.get('initData',''))
+        key=('u:'+str(user.get('id'))) if user and user.get('id') else ('ip:'+str(request.remote_addr or 'unknown'))
+        now=time.monotonic()
+        with API_HITS_LOCK:
+            hits=API_HITS[key]
+            while hits and now-hits[0]>10: hits.popleft()
+            if len(hits)>=35: return jsonify(ok=False,message='Bạn thao tác quá nhanh. Vui lòng thử lại sau.'),429
+            hits.append(now)
+            if len(API_HITS)>10000:
+                for k,v in list(API_HITS.items()):
+                    while v and now-v[0]>10: v.popleft()
+                    if not v: API_HITS.pop(k,None)
+        return fn(*args, **kwargs)
+    return wrapped
 
 @app.get('/')
 def home(): return send_from_directory(BASE_DIR,'index.html')
@@ -593,13 +620,70 @@ def health():
     except Exception as e: return jsonify(ok=False,error=str(e)),500
 
 @app.post('/api/access')
+@api_rate_limit
 def api_access():
     body=request.get_json(silent=True) or {}; user,error=access_check(body.get('initData',''))
     if error: return jsonify(**error[0]),error[1]
-    uid=int(user['id'])
-    return jsonify(ok=True,admin=uid in ADMIN_IDS,referral_count=referral_count(uid),required=3,profile={'id':uid,'first_name':user.get('first_name',''),'last_name':user.get('last_name',''),'username':user.get('username',''),'photo_url':user.get('photo_url','')})
+    uid=int(user['id']); upsert_user(user)
+    with db() as con:
+        con.execute('UPDATE users SET photo_url=? WHERE user_id=?',(user.get('photo_url',''),uid))
+        flags=con.execute('SELECT skip_invite FROM users WHERE user_id=?',(uid,)).fetchone()
+    return jsonify(ok=True,admin=uid in ADMIN_IDS,skip_invite=bool(flags and flags['skip_invite']),referral_count=referral_count(uid),required=3,profile={'id':uid,'first_name':user.get('first_name',''),'last_name':user.get('last_name',''),'username':user.get('username',''),'photo_url':user.get('photo_url','')})
+
+@app.post('/api/admin/users')
+@api_rate_limit
+def api_admin_users():
+    body=request.get_json(silent=True) or {}; user,error=access_check(body.get('initData',''))
+    if error: return jsonify(error[1]),error[0]
+    if int(user['id']) not in ADMIN_IDS: return jsonify(ok=False,message='Không có quyền quản trị.'),403
+    q=str(body.get('q','')).strip().lstrip('@')[:80]; page=max(0,min(int(body.get('page',0) or 0),100000)); limit=25; off=page*limit
+    with db() as con:
+        base="SELECT u.user_id,u.username,u.first_name,u.photo_url,u.skip_invite,CASE WHEN b.user_id IS NULL THEN 0 ELSE 1 END blocked FROM users u LEFT JOIN blocked_users b ON b.user_id=u.user_id"
+        if q:
+            cond=" WHERE CAST(u.user_id AS TEXT)=? OR lower(COALESCE(u.username,'')) LIKE ?" if q.isdigit() else " WHERE lower(COALESCE(u.username,'')) LIKE ?"
+            params=(q,'%'+q.lower()+'%') if q.isdigit() else ('%'+q.lower()+'%',)
+            rows=con.execute(base+cond+' ORDER BY u.user_id DESC LIMIT ? OFFSET ?',params+(limit,off)).fetchall()
+            total=con.execute('SELECT COUNT(*) FROM users'+(" WHERE CAST(user_id AS TEXT)=? OR lower(COALESCE(username,'')) LIKE ?" if q.isdigit() else " WHERE lower(COALESCE(username,'')) LIKE ?"),params).fetchone()[0]
+        else:
+            rows=con.execute(base+' ORDER BY u.user_id DESC LIMIT ? OFFSET ?',(limit,off)).fetchall(); total=con.execute('SELECT COUNT(*) FROM users').fetchone()[0]
+    return jsonify(ok=True,users=[dict(x) for x in rows],total=total,page=page,has_more=off+len(rows)<total)
+
+@app.post('/api/admin/user-detail')
+@api_rate_limit
+def api_admin_user_detail():
+    body=request.get_json(silent=True) or {}; user,error=access_check(body.get('initData',''))
+    if error: return jsonify(error[1]),error[0]
+    if int(user['id']) not in ADMIN_IDS: return jsonify(ok=False,message='Không có quyền quản trị.'),403
+    try: target=int(body.get('user_id'))
+    except (TypeError,ValueError): return jsonify(ok=False,message='ID không hợp lệ.'),400
+    with db() as con:
+        row=con.execute("SELECT u.user_id,u.username,u.first_name,u.photo_url,u.referrer_id,u.qualified,u.groups_verified,u.unlocked,u.skip_invite,u.created_at,CASE WHEN b.user_id IS NULL THEN 0 ELSE 1 END blocked FROM users u LEFT JOIN blocked_users b ON b.user_id=u.user_id WHERE u.user_id=?",(target,)).fetchone()
+        if not row: return jsonify(ok=False,message='Không tìm thấy người dùng.'),404
+        claims=con.execute('SELECT product_name,key_value,claimed_at FROM claims WHERE user_id=? ORDER BY id DESC LIMIT 100',(target,)).fetchall()
+        invited=con.execute('SELECT u.user_id,u.username,u.first_name,r.qualified_at FROM referrals r LEFT JOIN users u ON u.user_id=r.referred_id WHERE r.referrer_id=? ORDER BY r.qualified_at DESC LIMIT 100',(target,)).fetchall()
+        referral=con.execute('SELECT referrer_id,qualified_at FROM referrals WHERE referred_id=?',(target,)).fetchone()
+    return jsonify(ok=True,user=dict(row),claims=[dict(x) for x in claims],invited=[dict(x) for x in invited],referral=dict(referral) if referral else None)
+
+@app.post('/api/admin/user-action')
+@api_rate_limit
+def api_admin_user_action():
+    body=request.get_json(silent=True) or {}; user,error=access_check(body.get('initData',''))
+    if error: return jsonify(error[1]),error[0]
+    if int(user['id']) not in ADMIN_IDS: return jsonify(ok=False,message='Không có quyền quản trị.'),403
+    try: target=int(body.get('user_id'))
+    except (TypeError,ValueError): return jsonify(ok=False,message='ID không hợp lệ.'),400
+    if target in ADMIN_IDS: return jsonify(ok=False,message='Không thể thay đổi tài khoản quản trị viên.'),400
+    action=body.get('action')
+    with db() as con:
+        if not con.execute('SELECT user_id FROM users WHERE user_id=?',(target,)).fetchone(): return jsonify(ok=False,message='Không tìm thấy người dùng.'),404
+        if action=='block': con.execute('INSERT INTO blocked_users(user_id) VALUES(?) ON CONFLICT(user_id) DO NOTHING',(target,))
+        elif action=='unblock': con.execute('DELETE FROM blocked_users WHERE user_id=?',(target,))
+        elif action in ('skip_on','skip_off'): con.execute('UPDATE users SET skip_invite=? WHERE user_id=?',(1 if action=='skip_on' else 0,target))
+        else: return jsonify(ok=False,message='Thao tác không hợp lệ.'),400
+    return jsonify(ok=True)
 
 @app.post('/api/products')
+@api_rate_limit
 def api_products():
     body=request.get_json(silent=True) or {}; user,error=access_check(body.get('initData',''))
     if error: return jsonify(**error[0]),error[1]
@@ -610,6 +694,7 @@ def api_products():
         return jsonify(ok=True,products=[{'id':r['id'],'name':r['name'],'price':r['price'],'duration':r['duration'] or '', 'desc':r['description'] or '', 'image':r['image'] or '', 'keys':[], 'stock':r['stock'],'active':bool(r['active'])} for r in rows])
 
 @app.post('/api/admin/products')
+@api_rate_limit
 def api_admin_products():
     body=request.get_json(silent=True) or {}; user,error=access_check(body.get('initData',''))
     if error: return jsonify(**error[0]),error[1]
@@ -656,6 +741,7 @@ def api_admin_products():
     return jsonify(ok=False,message='Thao tác không hợp lệ.'),400
 
 @app.post('/api/claim')
+@api_rate_limit
 def api_claim():
     body=request.get_json(silent=True) or {}; user,error=access_check(body.get('initData',''))
     if error: return jsonify(**error[0]),error[1]
@@ -679,6 +765,7 @@ def api_claim():
         app.logger.exception('Claim transaction failed'); return jsonify(ok=False,message='Không thể hoàn tất giao dịch, vui lòng thử lại.'),500
 
 @app.post('/api/claim-history')
+@api_rate_limit
 def api_claim_history():
     body=request.get_json(silent=True) or {}; user,error=access_check(body.get('initData',''))
     if error: return jsonify(**error[0]),error[1]

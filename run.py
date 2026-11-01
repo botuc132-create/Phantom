@@ -3,7 +3,7 @@ import os, sys, signal, subprocess, time
 
 def main():
     env=os.environ.copy(); port=env.get('PORT','10000')
-    web=subprocess.Popen([sys.executable,'-m','gunicorn','--workers','2','--threads','8','--bind',f'0.0.0.0:{port}','--timeout','120','main:app'],env=env)
+    web=subprocess.Popen([sys.executable,'-m','gunicorn','--workers','2','--threads','12','--bind',f'0.0.0.0:{port}','--timeout','120','main:app'],env=env)
     bot=subprocess.Popen([sys.executable,'bot.py'],env=env) if env.get('BOT_TOKEN','').strip() else None
     children=[p for p in (web,bot) if p]
     def stop(*_):

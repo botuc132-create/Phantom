@@ -58,9 +58,9 @@ def main():
     # Ensure stale webhook is removed before polling. drop_pending_updates=False preserves queued updates.
     request('deleteWebhook',{'drop_pending_updates':'false'})
     offset=None
-    pool=ThreadPoolExecutor(max_workers=6,thread_name_prefix='tg-update')
-    pending_slots=threading.BoundedSemaphore(128)
-    log.info('Polling started; webhook removed. Update workers: 6')
+    pool=ThreadPoolExecutor(max_workers=12,thread_name_prefix='tg-update')
+    pending_slots=threading.BoundedSemaphore(512)
+    log.info('Polling started; webhook removed. Update workers: 12')
     try:
         while True:
             try:

@@ -54,3 +54,15 @@ DEPLOY FROM GITHUB
 4. Add the environment variables and persistent disk.
 5. Deploy, then open https://YOUR-SERVICE.onrender.com/health. Confirm ok=true, telegram_bot_configured=true, and required_groups matches your configured list.
 6. Test /start, group verification, referral completion, Mini App access, admin operations, product/key creation and key claiming.
+
+ADMIN MINI APP — USER MANAGEMENT
+- Admin panel now has a “Người dùng” tab with paginated user list and search by numeric Telegram ID or @username.
+- User detail shows Telegram ID, username, stored profile photo when Telegram supplies one, profile link, group/referral state, key-claim history and successful invite history.
+- Admin can block/unblock an account and enable/disable the per-user “skip invite requirement” switch. Blocking is checked by both bot messages/callbacks and Mini App API requests. Admin accounts cannot be blocked through this interface.
+- Profile photos are populated when a user opens the Mini App; Telegram does not provide photo URLs for every user in every context.
+
+LOAD / ABUSE CONTROLS
+- Web API has a short-window per-authenticated-Telegram-user request throttle (with a transient IP fallback for invalid/missing initData); it does not persist visitor IP addresses.
+- Bot update processing uses 12 concurrent workers, preserves ordering per Telegram user, and applies a bounded queue (512 pending updates). Gunicorn uses 2 workers × 12 threads to balance concurrency and memory usage.
+- For a deployment serving 1,000–2,000 registered accounts, use PostgreSQL (DATABASE_URL), a Render instance with enough CPU/RAM, and only one bot polling worker for the token. This is a configuration target, not a guarantee of 1,000–2,000 simultaneous requests; actual capacity depends on hosting resources, Telegram API limits, database latency and traffic bursts. Do not use SQLite for a multi-worker production deployment.
+- Multi-account detection cannot reliably prove distinct real-world people from Telegram IDs alone. IP/device fingerprint collection is intentionally not enabled; rate limits and referral uniqueness reduce automated abuse without storing sensitive tracking data.
