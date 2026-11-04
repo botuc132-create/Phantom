@@ -421,6 +421,7 @@ def admin_menu(chat_id):
         [{'text':'🔒 Khóa tài khoản','callback_data':'adm_lock'}],
         [{'text':'👥 Danh sách người dùng','callback_data':'adm_user_list'}],
         [{'text':'🛠 Bảo trì bot','callback_data':'adm_maintenance'}],
+        [{'text':'♻️ Reset toàn bộ dữ liệu người dùng','callback_data':'adm_reset_confirm'}],
         [{'text':'🤖 Trạng thái bot','callback_data':'adm_status'}]]}})
 
 
@@ -547,7 +548,8 @@ def process_update(update):
             with db() as con:
                 state=con.execute('SELECT groups_verified FROM users WHERE user_id=?',(uid,)).fetchone()
             if state and state['groups_verified']:
-                main_menu(m['chat']['id'])
+                if token == 'invite_menu': send_referral_gate(m['chat']['id'],uid)
+                else: main_menu(m['chat']['id'])
             else:
                 send_prompt(m['chat']['id'])
             return
@@ -578,6 +580,22 @@ def process_update(update):
         tg('answerCallbackQuery',{'callback_query_id':c['id']}); send_top(chat); return
     if uid not in ADMIN_IDS:
         tg('answerCallbackQuery',{'callback_query_id':c['id'],'text':'Bạn không có quyền.' ,'show_alert':True}); return
+    if data=='adm_reset_confirm':
+        tg('sendMessage',{'chat_id':chat,'text':'⚠️ XÁC NHẬN RESET TOÀN BỘ DỮ LIỆU NGƯỜI DÙNG?\n\nThao tác này sẽ xóa hồ sơ, điểm, lượt mời, lịch sử nhận key và trạng thái khóa của TẤT CẢ người dùng không phải Admin. Sau đó người dùng cũ có thể /start lại và lượt mời được tính lại khi đi qua link mời. Sản phẩm, kho key, nhóm/kênh và cài đặt bot được giữ nguyên.\n\nBạn chắc chắn muốn tiếp tục chứ?','reply_markup':{'inline_keyboard':[[{'text':'✅ XÁC NHẬN RESET','callback_data':'adm_reset_execute'}],[{'text':'❌ HỦY','callback_data':'adm_back'}]]}})
+    elif data=='adm_reset_execute':
+        ids=sorted(ADMIN_IDS)
+        with db() as con:
+            if ids:
+                marks=','.join('?' for _ in ids)
+                con.execute(f'DELETE FROM referrals WHERE referrer_id NOT IN ({marks}) OR referred_id NOT IN ({marks})',tuple(ids)+tuple(ids))
+                con.execute(f'DELETE FROM claims WHERE user_id NOT IN ({marks})',tuple(ids))
+                con.execute(f'DELETE FROM blocked_users WHERE user_id NOT IN ({marks})',tuple(ids))
+                con.execute(f'DELETE FROM users WHERE user_id NOT IN ({marks})',tuple(ids))
+            else:
+                con.execute('DELETE FROM referrals'); con.execute('DELETE FROM claims'); con.execute('DELETE FROM blocked_users'); con.execute('DELETE FROM users')
+        with MEMBER_CACHE_LOCK: MEMBER_CACHE.clear()
+        admin_text(chat,'✅ Đã reset dữ liệu người dùng. Admin, sản phẩm, kho key và cấu hình bot được giữ nguyên. Người dùng cũ có thể bắt đầu lại.')
+        admin_menu(chat)
     if data=='adm_links':
         links=optional_links(); rows=[]
         for item in links:
