@@ -320,14 +320,21 @@ def send_prompt(chat_id,message_id=None):
 
 
 def main_menu(chat_id):
-    tg('sendMessage',{'chat_id':chat_id,'text':'🎉 Chúc mừng bạn đã xác minh thành công! Hãy mời 4 bạn bè để nhận key free nhé!','reply_markup':{'inline_keyboard':[
-        [{'text':'👤 TÀI KHOẢN','callback_data':'user_account'},{'text':'🎁 MỜI BẠN BÈ','callback_data':'user_invite'}],
-        [{'text':'🏆 TOP MỜI BẠN BÈ','callback_data':'user_top'}],
-        ([{'text':'🚀 MỞ MINI APP','web_app':{'url':WEBAPP_URL}}] if WEBAPP_URL else [])
-    ] if WEBAPP_URL else [
-        [{'text':'👤 TÀI KHOẢN','callback_data':'user_account'},{'text':'🎁 MỜI BẠN BÈ','callback_data':'user_invite'}],
-        [{'text':'🏆 TOP MỜI BẠN BÈ','callback_data':'user_top'}]
-    ]}})
+    # Persistent ReplyKeyboardMarkup: buttons appear below the chat composer,
+    # not only attached to one message as inline buttons.
+    keyboard={
+        'keyboard':[
+            [{'text':'👤 TÀI KHOẢN'},{'text':'🎁 MỜI BẠN BÈ'}],
+            [{'text':'🏆 TOP MỜI BẠN BÈ'}]
+        ],
+        'resize_keyboard':True,
+        'is_persistent':True
+    }
+    tg('sendMessage',{
+        'chat_id':chat_id,
+        'text':'🎉 Chúc mừng bạn đã xác minh thành công! Hãy mời 4 bạn bè để nhận key free nhé!\n\nChọn một chức năng bên dưới:',
+        'reply_markup':keyboard
+    })
 
 
 def send_account(chat_id, uid):
@@ -516,12 +523,34 @@ def process_update(update):
                 with db() as con: con.execute('INSERT INTO blocked_users(user_id) VALUES(?) ON CONFLICT(user_id) DO NOTHING',(target,))
                 admin_text(m['chat']['id'],f'🔒 Đã khóa tài khoản ID {target}.'); return
         if text.startswith('/') and admin_command(m): return
+        # Handle the persistent three-button reply keyboard in the normal chat.
+        menu_actions={
+            '👤 TÀI KHOẢN':'account', 'TÀI KHOẢN':'account',
+            '🎁 MỜI BẠN BÈ':'invite', 'MỜI BẠN BÈ':'invite',
+            '🏆 TOP MỜI BẠN BÈ':'top', 'TOP MỜI BẠN BÈ':'top'
+        }
+        action=menu_actions.get(text.upper())
+        if action:
+            with db() as con:
+                state=con.execute('SELECT groups_verified FROM users WHERE user_id=?',(uid,)).fetchone()
+            if not state or not state['groups_verified']:
+                send_prompt(m['chat']['id']); return
+            if action=='account': send_account(m['chat']['id'],uid)
+            elif action=='invite': send_referral_gate(m['chat']['id'],uid)
+            else: send_top(m['chat']['id'])
+            return
         if text.startswith('/') and text.split()[0].split('@')[0]=='/start':
             args=text.split(maxsplit=1); token=args[1] if len(args)>1 else ''; ref=int(token[4:]) if token.startswith('ref_') and token[4:].isdigit() else None
             upsert_user(user,ref)
             send_optional_links(m['chat']['id'])
             if uid in ADMIN_IDS: send_app_button(m['chat']['id']); return
-            send_prompt(m['chat']['id']); return
+            with db() as con:
+                state=con.execute('SELECT groups_verified FROM users WHERE user_id=?',(uid,)).fetchone()
+            if state and state['groups_verified']:
+                main_menu(m['chat']['id'])
+            else:
+                send_prompt(m['chat']['id'])
+            return
     c=update.get('callback_query')
     if not c: return
     data=c.get('data',''); user=c.get('from',{}); uid=int(user.get('id',0)); msg=c.get('message',{}); chat=msg.get('chat',{}).get('id')
