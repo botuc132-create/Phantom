@@ -112,7 +112,7 @@ def init_db():
             schema = """
             CREATE TABLE IF NOT EXISTS groups_cfg(id BIGSERIAL PRIMARY KEY,chat_id TEXT UNIQUE NOT NULL,title TEXT NOT NULL,url TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS optional_links(id BIGSERIAL PRIMARY KEY,title TEXT NOT NULL,url TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS users(user_id BIGINT PRIMARY KEY,username TEXT,first_name TEXT,referrer_id BIGINT,qualified INTEGER NOT NULL DEFAULT 0,groups_verified INTEGER NOT NULL DEFAULT 0,unlocked INTEGER NOT NULL DEFAULT 0,created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,photo_url TEXT,skip_invite INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE IF NOT EXISTS users(user_id BIGINT PRIMARY KEY,username TEXT,first_name TEXT,referrer_id BIGINT,qualified INTEGER NOT NULL DEFAULT 0,groups_verified INTEGER NOT NULL DEFAULT 0,unlocked INTEGER NOT NULL DEFAULT 0,created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,photo_url TEXT,skip_invite INTEGER NOT NULL DEFAULT 0,points INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS referrals(referrer_id BIGINT NOT NULL,referred_id BIGINT UNIQUE NOT NULL,qualified_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP);
             CREATE TABLE IF NOT EXISTS products(id TEXT PRIMARY KEY,name TEXT NOT NULL,price TEXT NOT NULL,duration TEXT,description TEXT,image TEXT,active INTEGER NOT NULL DEFAULT 1);
             CREATE TABLE IF NOT EXISTS keys_stock(id BIGSERIAL PRIMARY KEY,product_id TEXT NOT NULL,key_value TEXT NOT NULL,created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE);
@@ -132,11 +132,12 @@ def init_db():
             con.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP')
             con.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS photo_url TEXT')
             con.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS skip_invite INTEGER NOT NULL DEFAULT 0')
+            con.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS points INTEGER NOT NULL DEFAULT 0')
         else:
             con.executescript("""
             CREATE TABLE IF NOT EXISTS groups_cfg(id INTEGER PRIMARY KEY AUTOINCREMENT,chat_id TEXT UNIQUE NOT NULL,title TEXT NOT NULL,url TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS optional_links(id INTEGER PRIMARY KEY AUTOINCREMENT,title TEXT NOT NULL,url TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS users(user_id INTEGER PRIMARY KEY,username TEXT,first_name TEXT,referrer_id INTEGER,qualified INTEGER NOT NULL DEFAULT 0,groups_verified INTEGER NOT NULL DEFAULT 0,unlocked INTEGER NOT NULL DEFAULT 0,created_at TEXT DEFAULT CURRENT_TIMESTAMP,photo_url TEXT,skip_invite INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE IF NOT EXISTS users(user_id INTEGER PRIMARY KEY,username TEXT,first_name TEXT,referrer_id INTEGER,qualified INTEGER NOT NULL DEFAULT 0,groups_verified INTEGER NOT NULL DEFAULT 0,unlocked INTEGER NOT NULL DEFAULT 0,created_at TEXT DEFAULT CURRENT_TIMESTAMP,photo_url TEXT,skip_invite INTEGER NOT NULL DEFAULT 0,points INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS referrals(referrer_id INTEGER NOT NULL,referred_id INTEGER UNIQUE NOT NULL,qualified_at TEXT DEFAULT CURRENT_TIMESTAMP);
             CREATE TABLE IF NOT EXISTS products(id TEXT PRIMARY KEY,name TEXT NOT NULL,price TEXT NOT NULL,duration TEXT,description TEXT,image TEXT,active INTEGER NOT NULL DEFAULT 1);
             CREATE TABLE IF NOT EXISTS keys_stock(id INTEGER PRIMARY KEY AUTOINCREMENT,product_id TEXT NOT NULL,key_value TEXT NOT NULL,created_at TEXT DEFAULT CURRENT_TIMESTAMP,FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE);
@@ -151,7 +152,7 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_products_active ON products(active);
             """)
             user_cols={r['name'] for r in con.execute('PRAGMA table_info(users)')}
-            for name, declaration in [('groups_verified','INTEGER NOT NULL DEFAULT 0'),('unlocked','INTEGER NOT NULL DEFAULT 0'),('created_at',"TEXT DEFAULT CURRENT_TIMESTAMP"),('photo_url','TEXT'),('skip_invite','INTEGER NOT NULL DEFAULT 0')]:
+            for name, declaration in [('groups_verified','INTEGER NOT NULL DEFAULT 0'),('unlocked','INTEGER NOT NULL DEFAULT 0'),('created_at',"TEXT DEFAULT CURRENT_TIMESTAMP"),('photo_url','TEXT'),('skip_invite','INTEGER NOT NULL DEFAULT 0'),('points','INTEGER NOT NULL DEFAULT 0')]:
                 if name not in user_cols: con.execute(f'ALTER TABLE users ADD COLUMN {name} {declaration}')
         try: initial=json.loads(os.getenv('REQUIRED_GROUPS','[]') or '[]')
         except (TypeError,ValueError): initial=[]
@@ -283,6 +284,7 @@ def missing_groups(uid):
 
 
 def qualify_referral(uid):
+    """Count a referred account once when it first starts the bot; award 10 points."""
     inviter=None; inserted=False
     with db() as con:
         u=con.execute('SELECT referrer_id,qualified FROM users WHERE user_id=?',(uid,)).fetchone()
@@ -291,15 +293,14 @@ def qualify_referral(uid):
         con.execute('UPDATE users SET qualified=1,groups_verified=1 WHERE user_id=?',(uid,))
         if inviter and inviter != uid:
             inserted=con.execute('INSERT OR IGNORE INTO referrals(referrer_id,referred_id) VALUES(?,?)',(inviter,uid)).rowcount == 1
-        if inviter and con.execute('SELECT COUNT(*) FROM referrals WHERE referrer_id=?',(inviter,)).fetchone()[0]>=3:
-            con.execute('UPDATE users SET unlocked=1 WHERE user_id=?',(inviter,))
+            if inserted:
+                con.execute('UPDATE users SET points=points+10 WHERE user_id=?',(inviter,))
     if inserted:
         try:
-            with db() as con: who=con.execute('SELECT username,first_name FROM users WHERE user_id=?',(uid,)).fetchone()
+            with db() as con: who=con.execute('SELECT username,first_name,points FROM users WHERE user_id=?',(uid,)).fetchone()
             label='@'+who['username'] if who and who['username'] else (who['first_name'] if who else 'Người dùng')
-            count=referral_count(inviter)
-            tg('sendMessage',{'chat_id':inviter,'text':f'🎉 Có người được tính vào link giới thiệu của bạn!\n👤 {label}\n🆔 ID: {uid}\n📊 Tiến độ: {count}/3 người.\n'+('🎁 Bạn đã mở khóa Mini App!' if count>=3 else f'⏳ Còn thiếu {3-count} người nữa.')})
-            if count>=3: send_app_button(inviter)
+            with db() as con: balance=con.execute('SELECT points FROM users WHERE user_id=?',(inviter,)).fetchone()[0]
+            tg('sendMessage',{'chat_id':inviter,'text':f'🎉 Bạn vừa mời thành công một người bạn!\n👤 {label}\n🎁 +10 điểm\n💎 Số dư hiện tại: {balance} điểm.'})
         except Exception: app.logger.exception('Referral notification failed')
 
 
@@ -325,22 +326,15 @@ def send_app_button(chat_id):
 
 
 def send_referral_gate(chat_id,uid):
-    count=referral_count(uid)
-    with db() as con: row=con.execute('SELECT skip_invite FROM users WHERE user_id=?',(uid,)).fetchone()
-    if count>=3 or (row and row['skip_invite']): send_app_button(chat_id); return
+    with db() as con: row=con.execute('SELECT points FROM users WHERE user_id=?',(uid,)).fetchone()
+    points=int(row['points'] if row else 0)
     link=referral_link(uid)
-    text=f'✅ Bạn đã xác minh tham gia nhóm thành công!\n\nĐể mở khóa Mini App, bạn cần mời 3 người bạn mới tham gia bot.\n\n🔗 Link giới thiệu của bạn:\n{link or "Không lấy được link bot, hãy kiểm tra BOT_TOKEN."}\n\n📊 Tiến độ: {count}/3 người.\n⏳ Còn thiếu: {3-count} người.'
+    text=f'🎁 MỜI BẠN BÈ NHẬN ĐIỂM\n\nMỗi người bạn mới vào bot qua link của bạn: +10 điểm.\nĐủ 40 điểm có thể đổi 1 key.\n\n💎 Điểm hiện tại: {points}/40\n🔗 Link mời bạn bè: {link or "Không lấy được link bot, hãy kiểm tra BOT_TOKEN."}'
     params={'chat_id':chat_id,'text':text}
-    if link:
-        # Telegram's native copy_text button copies the exact referral URL in one tap.
-        params['reply_markup']={'inline_keyboard':[[{'text':'📋 SAO CHÉP LINK MỜI','copy_text':{'text':link}}]]}
-    try:
-        tg('sendMessage',params)
+    if link: params['reply_markup']={'inline_keyboard':[[{'text':'📋 SAO CHÉP LINK MỜI','copy_text':{'text':link}}]]}
+    try: tg('sendMessage',params)
     except Exception:
-        # Keep the verification/referral flow usable on older Bot API implementations.
-        if 'reply_markup' not in params: raise
-        params.pop('reply_markup',None)
-        tg('sendMessage',params)
+        params.pop('reply_markup',None); tg('sendMessage',params)
 
 
 def add_required_group_from_link(url):
@@ -487,9 +481,6 @@ def process_update(update):
             upsert_user(user,ref)
             send_optional_links(m['chat']['id'])
             if uid in ADMIN_IDS: send_app_button(m['chat']['id']); return
-            if not groups(): admin_text(m['chat']['id'],'⚠️ Chủ bot chưa cấu hình nhóm bắt buộc.'); return
-            miss=missing_groups(uid)
-            if miss: send_prompt(m['chat']['id']); return
             qualify_referral(uid); send_referral_gate(m['chat']['id'],uid); return
     c=update.get('callback_query')
     if not c: return
@@ -501,10 +492,7 @@ def process_update(update):
     if data=='verify':
         upsert_user(user)
         if uid in ADMIN_IDS: tg('answerCallbackQuery',{'callback_query_id':c['id'],'text':'Admin được cấp quyền.'}); send_app_button(chat); return
-        miss=missing_groups(uid)
-        if miss:
-            tg('answerCallbackQuery',{'callback_query_id':c['id'],'text':'Còn thiếu: '+', '.join(g['title'] for g in miss),'show_alert':True}); send_prompt(chat,msg.get('message_id')); return
-        qualify_referral(uid); tg('answerCallbackQuery',{'callback_query_id':c['id'],'text':'Đã xác minh nhóm!'}); send_referral_gate(chat,uid); return
+        qualify_referral(uid); tg('answerCallbackQuery',{'callback_query_id':c['id'],'text':'Đã cập nhật điểm!'}); send_referral_gate(chat,uid); return
     if uid not in ADMIN_IDS:
         tg('answerCallbackQuery',{'callback_query_id':c['id'],'text':'Bạn không có quyền.' ,'show_alert':True}); return
     if data=='adm_links':
@@ -595,10 +583,6 @@ def access_check(raw):
     if uid not in ADMIN_IDS:
         with db() as con: row=con.execute('SELECT unlocked,skip_invite FROM users WHERE user_id=?',(uid,)).fetchone()
         if not row: return None,({'ok':False,'reason':'not_started','message':'Bạn chưa xác minh trong bot Telegram.'},403)
-        miss=missing_groups(uid)
-        if miss: return None,({'ok':False,'reason':'groups','missing':[g['title'] for g in miss],'message':'Bạn chưa tham gia đủ nhóm bắt buộc. Hãy quay lại bot và xác minh.'},403)
-        count=referral_count(uid)
-        if not row['skip_invite'] and count<3: return None,({'ok':False,'reason':'referrals','referral_count':count,'remaining':3-count,'message':'Bạn chưa mời đủ 3 người bạn. Hãy quay lại bot và mời thêm bạn bè để mở khóa Mini App nhé!'},403)
         with db() as con: con.execute('UPDATE users SET unlocked=1 WHERE user_id=?',(uid,))
     return user,None
 
@@ -639,7 +623,8 @@ def api_access():
     with db() as con:
         con.execute('UPDATE users SET photo_url=? WHERE user_id=?',(user.get('photo_url',''),uid))
         flags=con.execute('SELECT skip_invite FROM users WHERE user_id=?',(uid,)).fetchone()
-    return jsonify(ok=True,admin=uid in ADMIN_IDS,skip_invite=bool(flags and flags['skip_invite']),referral_count=referral_count(uid),required=3,profile={'id':uid,'first_name':user.get('first_name',''),'last_name':user.get('last_name',''),'username':user.get('username',''),'photo_url':user.get('photo_url','')})
+    with db() as con: points_row=con.execute('SELECT points FROM users WHERE user_id=?',(uid,)).fetchone()
+    return jsonify(ok=True,admin=uid in ADMIN_IDS,points=int(points_row['points'] if points_row else 0),referral_count=referral_count(uid),points_per_invite=10,claim_cost=40,profile={'id':uid,'first_name':user.get('first_name',''),'last_name':user.get('last_name',''),'username':user.get('username',''),'photo_url':user.get('photo_url','')})
 
 @app.post('/api/admin/users')
 @api_rate_limit
@@ -777,9 +762,20 @@ def api_claim():
             lock_sql = ' FOR UPDATE SKIP LOCKED' if DB_BACKEND == 'postgres' else ''
             key=con.execute('SELECT id,key_value FROM keys_stock WHERE product_id=? ORDER BY id LIMIT 1'+lock_sql,(pid,)).fetchone()
             if not key: return jsonify(ok=False,message='Sản phẩm đã hết key.'),409
+            if uid not in ADMIN_IDS:
+                if DB_BACKEND == 'postgres':
+                    balance_row=con.execute('SELECT points FROM users WHERE user_id=? FOR UPDATE',(uid,)).fetchone()
+                else:
+                    balance_row=con.execute('SELECT points FROM users WHERE user_id=?',(uid,)).fetchone()
+                balance=int(balance_row['points'] if balance_row else 0)
+                if balance < 40: return jsonify(ok=False,message=f'Bạn cần 40 điểm để đổi key. Hiện có {balance} điểm, còn thiếu {40-balance} điểm.'),403
+                con.execute('UPDATE users SET points=points-40 WHERE user_id=?',(uid,))
             con.execute('DELETE FROM keys_stock WHERE id=?',(key['id'],))
             con.execute('INSERT INTO claims(user_id,product_id,product_name,key_value) VALUES(?,?,?,?)',(uid,pid,p['name'],key['key_value']))
-            return jsonify(ok=True,key=key['key_value'],productName=p['name'],price=p['price'])
+            balance=0
+            if uid not in ADMIN_IDS:
+                balance_row=con.execute('SELECT points FROM users WHERE user_id=?',(uid,)).fetchone(); balance=int(balance_row['points'] if balance_row else 0)
+            return jsonify(ok=True,key=key['key_value'],productName=p['name'],price=p['price'],points=balance)
     except Exception:
         app.logger.exception('Claim transaction failed'); return jsonify(ok=False,message='Không thể hoàn tất giao dịch, vui lòng thử lại.'),500
 
