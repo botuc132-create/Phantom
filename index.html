@@ -99,22 +99,34 @@ document.getElementById('inviteFriendsBtn')?.addEventListener('click',()=>{const
 verifyTelegramAccess();
 </script>
 
-<audio id="entryMusic" preload="auto" loop playsinline></audio>
+<audio id="entryMusic" autoplay="autoplay" preload="auto" loop playsinline></audio>
 <button id="musicToggle" aria-label="Tắt âm thanh" title="Tắt / bật nhạc" style="position:fixed;right:16px;bottom:18px;z-index:9999;border:1px solid #287eb9;background:#0b2343;color:#dff7ff;border-radius:50%;width:48px;height:48px;font-size:20px;box-shadow:0 5px 18px #0005;cursor:pointer">🔊</button>
 <script>
 (()=> {
  const audio=document.getElementById('entryMusic');
- audio.src='music.mp3'; audio.volume=0.65;
- const toggle=document.getElementById('musicToggle'); let muted=false;
+ audio.src='music.mp3'; audio.volume=0.65; audio.loop=true; audio.autoplay=true;
+ const toggle=document.getElementById('musicToggle'); let muted=false, started=false;
+ const playMusic=()=>{
+   if(muted) return;
+   const p=audio.play();
+   if(p && typeof p.then==='function') p.then(()=>{started=true;toggle.textContent='🔊';})
+     .catch(()=>{ /* WebView autoplay may require first user interaction */ });
+ };
  toggle.addEventListener('click',()=>{
    muted=!muted; audio.muted=muted; toggle.textContent=muted?'🔇':'🔊';
    toggle.setAttribute('aria-label',muted?'Bật âm thanh':'Tắt âm thanh');
-   if(!muted) audio.play().catch(()=>{});
+   if(!muted){audio.currentTime=0;playMusic();}
  });
- const start=()=>audio.play().catch(()=>{toggle.textContent='🔇';});
- document.addEventListener('visibilitychange',()=>{if(!document.hidden&&!muted){audio.currentTime=0;start();}});
- window.addEventListener('pageshow',()=>{if(!muted){audio.currentTime=0;start();}});
- start();
+ // Retry automatically when the user first interacts with the Mini App,
+ // since Telegram/Android WebView may block unmuted autoplay on initial load.
+ const unlock=()=>{ if(!muted && !started) playMusic(); };
+ ['pointerdown','touchstart','click','keydown'].forEach(evt=>
+   document.addEventListener(evt,unlock,{once:true,passive:true}));
+ document.addEventListener('visibilitychange',()=>{
+   if(!document.hidden&&!muted){audio.currentTime=0;playMusic();}
+ });
+ window.addEventListener('pageshow',()=>{if(!muted){audio.currentTime=0;playMusic();}});
+ playMusic();
 })();
 </script>
 </body></html>
