@@ -319,6 +319,46 @@ def send_prompt(chat_id,message_id=None):
     tg('sendMessage',p)
 
 
+def main_menu(chat_id):
+    tg('sendMessage',{'chat_id':chat_id,'text':'🎉 Chúc mừng bạn đã xác minh thành công! Hãy mời 4 bạn bè để nhận key free nhé!','reply_markup':{'inline_keyboard':[
+        [{'text':'👤 TÀI KHOẢN','callback_data':'user_account'},{'text':'🎁 MỜI BẠN BÈ','callback_data':'user_invite'}],
+        [{'text':'🏆 TOP MỜI BẠN BÈ','callback_data':'user_top'}],
+        ([{'text':'🚀 MỞ MINI APP','web_app':{'url':WEBAPP_URL}}] if WEBAPP_URL else [])
+    ] if WEBAPP_URL else [
+        [{'text':'👤 TÀI KHOẢN','callback_data':'user_account'},{'text':'🎁 MỜI BẠN BÈ','callback_data':'user_invite'}],
+        [{'text':'🏆 TOP MỜI BẠN BÈ','callback_data':'user_top'}]
+    ]}})
+
+
+def send_account(chat_id, uid):
+    with db() as con:
+        row=con.execute('SELECT points FROM users WHERE user_id=?',(uid,)).fetchone()
+        total=con.execute('SELECT COUNT(*) FROM referrals WHERE referrer_id=?',(uid,)).fetchone()[0]
+        if DB_BACKEND=='postgres':
+            today_inv=con.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id=? AND qualified_at::date=CURRENT_DATE",(uid,)).fetchone()[0]
+            today_claim=con.execute("SELECT COUNT(*) FROM claims WHERE user_id=? AND claimed_at::date=CURRENT_DATE",(uid,)).fetchone()[0]
+            recent=con.execute("SELECT COUNT(*) FROM (SELECT claimed_at FROM claims WHERE user_id=? ORDER BY id DESC LIMIT 2) q WHERE claimed_at >= CURRENT_TIMESTAMP - INTERVAL '24 hours'",(uid,)).fetchone()[0]
+        else:
+            today_inv=con.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id=? AND date(qualified_at)=date('now')",(uid,)).fetchone()[0]
+            today_claim=con.execute("SELECT COUNT(*) FROM claims WHERE user_id=? AND date(claimed_at)=date('now')",(uid,)).fetchone()[0]
+            recent=con.execute("SELECT COUNT(*) FROM (SELECT claimed_at FROM claims WHERE user_id=? ORDER BY id DESC LIMIT 2) q WHERE datetime(claimed_at)>=datetime('now','-24 hours')",(uid,)).fetchone()[0]
+    pts=int(row['points'] if row else 0); used=min(2,int(recent))
+    txt=(f'╭━━━ ✨ THÔNG TIN ĐIỂM ✨ ━━━╮\n\n💎 Số điểm hiện có\n└ 💰 {pts:,} điểm\n\n🪪 ID người dùng: {uid}\n\n━━━━━━━━━━━━━━━━━━\n\n👥 THỐNG KÊ GIỚI THIỆU\n\n🏆 Tổng lượt mời: {total}\n📅 Lượt mời hôm nay: {today_inv}\n🔑 Lượt đổi key hôm nay: {today_claim}\n🎟️ Lượt đổi key còn hôm nay: {max(0,2-used)}/2\n\n━━━━━━━━━━━━━━━━━━\n\n🎁 Mời bạn bè tham gia để tích lũy thêm điểm nhé!\n╰━━━━━━━━━━━━━━━━━━╯')
+    tg('sendMessage',{'chat_id':chat_id,'text':txt,'reply_markup':{'inline_keyboard':[[{'text':'📋 SAO CHÉP ID','copy_text':{'text':str(uid)}}],[{'text':'🎁 MỜI BẠN BÈ','callback_data':'user_invite'},{'text':'🏆 TOP TUẦN','callback_data':'user_top'}]]}})
+
+
+def send_top(chat_id):
+    with db() as con:
+        if DB_BACKEND=='postgres': rows=con.execute("SELECT r.referrer_id,COUNT(*) n,MAX(u.username) username,MAX(u.first_name) first_name FROM referrals r LEFT JOIN users u ON u.user_id=r.referrer_id WHERE r.qualified_at>=CURRENT_TIMESTAMP-INTERVAL '7 days' GROUP BY r.referrer_id ORDER BY n DESC,r.referrer_id LIMIT 5").fetchall()
+        else: rows=con.execute("SELECT r.referrer_id,COUNT(*) n,MAX(u.username) username,MAX(u.first_name) first_name FROM referrals r LEFT JOIN users u ON u.user_id=r.referrer_id WHERE datetime(r.qualified_at)>=datetime('now','-7 days') GROUP BY r.referrer_id ORDER BY n DESC,r.referrer_id LIMIT 5").fetchall()
+    lines=['🏆 TOP 5 NGƯỜI MỜI NHIỀU NHẤT (7 NGÀY)','']
+    for i,r in enumerate(rows,1):
+        name='@'+r['username'] if r['username'] else (r['first_name'] or str(r['referrer_id']))
+        lines += ['------------------',f'Top {i}: {name} ({r["n"]} người mời)']
+    lines.append('------------------')
+    if not rows: lines.append('Chưa có lượt mời trong 7 ngày qua.')
+    tg('sendMessage',{'chat_id':chat_id,'text':'\n'.join(lines)})
+
 def send_app_button(chat_id):
     if not WEBAPP_URL:
         tg('sendMessage',{'chat_id':chat_id,'text':'Đã đủ điều kiện nhưng chủ bot chưa cấu hình WEBAPP_URL.'}); return
@@ -481,7 +521,7 @@ def process_update(update):
             upsert_user(user,ref)
             send_optional_links(m['chat']['id'])
             if uid in ADMIN_IDS: send_app_button(m['chat']['id']); return
-            qualify_referral(uid); send_referral_gate(m['chat']['id'],uid); return
+            send_prompt(m['chat']['id']); return
     c=update.get('callback_query')
     if not c: return
     data=c.get('data',''); user=c.get('from',{}); uid=int(user.get('id',0)); msg=c.get('message',{}); chat=msg.get('chat',{}).get('id')
@@ -491,8 +531,22 @@ def process_update(update):
         tg('answerCallbackQuery',{'callback_query_id':c['id'],'text':'Bot đang bảo trì, hãy quay lại sau nhé.','show_alert':True}); return
     if data=='verify':
         upsert_user(user)
-        if uid in ADMIN_IDS: tg('answerCallbackQuery',{'callback_query_id':c['id'],'text':'Admin được cấp quyền.'}); send_app_button(chat); return
-        qualify_referral(uid); tg('answerCallbackQuery',{'callback_query_id':c['id'],'text':'Đã cập nhật điểm!'}); send_referral_gate(chat,uid); return
+        if uid in ADMIN_IDS:
+            tg('answerCallbackQuery',{'callback_query_id':c['id'],'text':'Admin được cấp quyền.'}); send_app_button(chat); return
+        missing=missing_groups(uid)
+        if missing:
+            tg('answerCallbackQuery',{'callback_query_id':c['id'],'text':'Bạn chưa tham gia đủ nhóm/kênh bắt buộc.','show_alert':True})
+            send_prompt(chat); return
+        with db() as con: con.execute('UPDATE users SET groups_verified=1,unlocked=1 WHERE user_id=?',(uid,))
+        qualify_referral(uid)
+        tg('answerCallbackQuery',{'callback_query_id':c['id'],'text':'Xác minh thành công!'})
+        main_menu(chat); return
+    if data=='user_account':
+        tg('answerCallbackQuery',{'callback_query_id':c['id']}); send_account(chat,uid); return
+    if data=='user_invite':
+        tg('answerCallbackQuery',{'callback_query_id':c['id']}); send_referral_gate(chat,uid); return
+    if data=='user_top':
+        tg('answerCallbackQuery',{'callback_query_id':c['id']}); send_top(chat); return
     if uid not in ADMIN_IDS:
         tg('answerCallbackQuery',{'callback_query_id':c['id'],'text':'Bạn không có quyền.' ,'show_alert':True}); return
     if data=='adm_links':
@@ -581,8 +635,9 @@ def access_check(raw):
     if uid not in ADMIN_IDS and maintenance_enabled():
         return None,({'ok':False,'reason':'maintenance','message':'🛠 Bot đang bảo trì, hãy quay lại sau nhé.'},503)
     if uid not in ADMIN_IDS:
-        with db() as con: row=con.execute('SELECT unlocked,skip_invite FROM users WHERE user_id=?',(uid,)).fetchone()
-        if not row: return None,({'ok':False,'reason':'not_started','message':'Bạn chưa xác minh trong bot Telegram.'},403)
+        with db() as con: row=con.execute('SELECT unlocked,skip_invite,groups_verified FROM users WHERE user_id=?',(uid,)).fetchone()
+        if not row or not row['groups_verified']:
+            return None,({'ok':False,'reason':'not_verified','message':'Bạn cần tham gia đủ nhóm và xác minh trong bot Telegram trước khi mở Mini App.'},403)
         with db() as con: con.execute('UPDATE users SET unlocked=1 WHERE user_id=?',(uid,))
     return user,None
 
@@ -623,8 +678,17 @@ def api_access():
     with db() as con:
         con.execute('UPDATE users SET photo_url=? WHERE user_id=?',(user.get('photo_url',''),uid))
         flags=con.execute('SELECT skip_invite FROM users WHERE user_id=?',(uid,)).fetchone()
-    with db() as con: points_row=con.execute('SELECT points FROM users WHERE user_id=?',(uid,)).fetchone()
-    return jsonify(ok=True,admin=uid in ADMIN_IDS,points=int(points_row['points'] if points_row else 0),referral_count=referral_count(uid),points_per_invite=10,claim_cost=40,profile={'id':uid,'first_name':user.get('first_name',''),'last_name':user.get('last_name',''),'username':user.get('username',''),'photo_url':user.get('photo_url','')})
+    with db() as con:
+        points_row=con.execute('SELECT points FROM users WHERE user_id=?',(uid,)).fetchone()
+        if DB_BACKEND=='postgres':
+            today_inv=con.execute('SELECT COUNT(*) FROM referrals WHERE referrer_id=? AND qualified_at::date=CURRENT_DATE',(uid,)).fetchone()[0]
+            today_claim=con.execute('SELECT COUNT(*) FROM claims WHERE user_id=? AND claimed_at::date=CURRENT_DATE',(uid,)).fetchone()[0]
+            used=con.execute("SELECT COUNT(*) FROM (SELECT claimed_at FROM claims WHERE user_id=? ORDER BY id DESC LIMIT 2) q WHERE claimed_at>=CURRENT_TIMESTAMP-INTERVAL '24 hours'",(uid,)).fetchone()[0]
+        else:
+            today_inv=con.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id=? AND date(qualified_at)=date('now')",(uid,)).fetchone()[0]
+            today_claim=con.execute("SELECT COUNT(*) FROM claims WHERE user_id=? AND date(claimed_at)=date('now')",(uid,)).fetchone()[0]
+            used=con.execute("SELECT COUNT(*) FROM (SELECT claimed_at FROM claims WHERE user_id=? ORDER BY id DESC LIMIT 2) q WHERE datetime(claimed_at)>=datetime('now','-24 hours')",(uid,)).fetchone()[0]
+    return jsonify(ok=True,admin=uid in ADMIN_IDS,points=int(points_row['points'] if points_row else 0),referral_count=referral_count(uid),today_invites=today_inv,today_claims=today_claim,claims_remaining=max(0,2-min(2,int(used))),points_per_invite=10,claim_cost=40,referral_link=referral_link(uid),profile={'id':uid,'first_name':user.get('first_name',''),'last_name':user.get('last_name',''),'username':user.get('username',''),'photo_url':user.get('photo_url','')})
 
 @app.post('/api/admin/users')
 @api_rate_limit
@@ -653,7 +717,7 @@ def api_admin_user_detail():
     try: target=int(body.get('user_id'))
     except (TypeError,ValueError): return jsonify(ok=False,message='ID không hợp lệ.'),400
     with db() as con:
-        row=con.execute("SELECT u.user_id,u.username,u.first_name,u.photo_url,u.referrer_id,u.qualified,u.groups_verified,u.unlocked,u.skip_invite,u.created_at,CASE WHEN b.user_id IS NULL THEN 0 ELSE 1 END blocked FROM users u LEFT JOIN blocked_users b ON b.user_id=u.user_id WHERE u.user_id=?",(target,)).fetchone()
+        row=con.execute("SELECT u.user_id,u.username,u.first_name,u.photo_url,u.points,u.referrer_id,u.qualified,u.groups_verified,u.unlocked,u.skip_invite,u.created_at,CASE WHEN b.user_id IS NULL THEN 0 ELSE 1 END blocked FROM users u LEFT JOIN blocked_users b ON b.user_id=u.user_id WHERE u.user_id=?",(target,)).fetchone()
         if not row: return jsonify(ok=False,message='Không tìm thấy người dùng.'),404
         claims=con.execute('SELECT product_name,key_value,claimed_at FROM claims WHERE user_id=? ORDER BY id DESC LIMIT 100',(target,)).fetchall()
         invited=con.execute('SELECT u.user_id,u.username,u.first_name,r.qualified_at FROM referrals r LEFT JOIN users u ON u.user_id=r.referred_id WHERE r.referrer_id=? ORDER BY r.qualified_at DESC LIMIT 100',(target,)).fetchall()
@@ -675,6 +739,13 @@ def api_admin_user_action():
         if action=='block': con.execute('INSERT INTO blocked_users(user_id) VALUES(?) ON CONFLICT(user_id) DO NOTHING',(target,))
         elif action=='unblock': con.execute('DELETE FROM blocked_users WHERE user_id=?',(target,))
         elif action in ('skip_on','skip_off'): con.execute('UPDATE users SET skip_invite=? WHERE user_id=?',(1 if action=='skip_on' else 0,target))
+        elif action in ('points_add','points_sub'):
+            try: amount=int(body.get('amount',0))
+            except (TypeError,ValueError): amount=0
+            if amount<1 or amount>1000000: return jsonify(ok=False,message='Số điểm phải từ 1 đến 1.000.000.'),400
+            delta=amount if action=='points_add' else -amount
+            if action=='points_sub': con.execute('UPDATE users SET points=CASE WHEN points+? < 0 THEN 0 ELSE points+? END WHERE user_id=?',(delta,delta,target))
+            else: con.execute('UPDATE users SET points=points+? WHERE user_id=?',(delta,target))
         else: return jsonify(ok=False,message='Thao tác không hợp lệ.'),400
     return jsonify(ok=True)
 
