@@ -70,9 +70,9 @@ def main():
     else:
         log.warning('WEBAPP_URL is empty; persistent Mini App menu button was not configured.')
     offset=None
-    pool=ThreadPoolExecutor(max_workers=12,thread_name_prefix='tg-update')
-    pending_slots=threading.BoundedSemaphore(512)
-    log.info('Polling started; webhook removed. Update workers: 12')
+    pool=ThreadPoolExecutor(max_workers=32,thread_name_prefix='tg-update')
+    pending_slots=threading.BoundedSemaphore(2048)
+    log.info('Polling started; webhook removed. Update workers: 32')
     try:
         while True:
             try:
