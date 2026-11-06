@@ -283,6 +283,20 @@ def missing_groups(uid):
     return result
 
 
+
+def refresh_membership(uid):
+    # Never trust the old groups_verified flag alone: re-check Telegram on access.
+    with MEMBER_CACHE_LOCK:
+        for key in list(MEMBER_CACHE):
+            if key[0] == int(uid):
+                MEMBER_CACHE.pop(key, None)
+    missing = missing_groups(uid)
+    if missing:
+        with db() as con:
+            con.execute('UPDATE users SET groups_verified=0,unlocked=0 WHERE user_id=?',(int(uid),))
+    return missing
+
+
 def qualify_referral(uid):
     """Count a referred account once when it first starts the bot; award 10 points."""
     inviter=None; inserted=False
@@ -304,14 +318,16 @@ def qualify_referral(uid):
         except Exception: app.logger.exception('Referral notification failed')
 
 
-def group_keyboard():
-    rows=[[{'text':'📢 '+g['title'],'url':g['url']}] for g in groups()]
+def group_keyboard(uid=None):
+    required=missing_groups(uid) if uid is not None else groups()
+    rows=[[{'text':'📢 '+g['title'],'url':g['url']}] for g in required]
     rows.append([{'text':'✅ XÁC MINH','callback_data':'verify'}])
     return {'inline_keyboard':rows}
 
 
-def send_prompt(chat_id,message_id=None):
-    p={'chat_id':chat_id,'text':'👋 Để tiếp tục, hãy tham gia tất cả kênh/nhóm bắt buộc bên dưới, sau đó nhấn XÁC MINH.','reply_markup':group_keyboard()}
+def send_prompt(chat_id,message_id=None,uid=None):
+    text='👋 Hãy tham gia các nhóm/kênh còn thiếu bên dưới, sau đó nhấn XÁC MINH.'
+    p={'chat_id':chat_id,'text':text,'reply_markup':group_keyboard(uid)}
     if message_id:
         p['message_id']=message_id
         try: tg('editMessageText',p); return
@@ -332,7 +348,7 @@ def main_menu(chat_id):
     }
     tg('sendMessage',{
         'chat_id':chat_id,
-        'text':'🎉 Chúc mừng bạn đã xác minh thành công! Hãy mời 4 bạn bè để nhận key free nhé!\n\nChọn một chức năng bên dưới:',
+        'text':'🎉 Chúc mừng bạn đã xác minh thành công! Mời 3 bạn bè thành công để đủ 30 điểm đổi key nhé!\n\nChọn một chức năng bên dưới:',
         'reply_markup':keyboard
     })
 
@@ -368,7 +384,7 @@ def send_top(chat_id):
 
 def send_app_button(chat_id):
     if not WEBAPP_URL:
-        tg('sendMessage',{'chat_id':chat_id,'text':'Đã đủ điều kiện nhưng chủ bot chưa cấu hình WEBAPP_URL.'}); return
+        tg('sendMessage',{'chat_id':chat_id,'text':'Hãy tham gia đủ nhóm/kênh và nhấn XÁC MINH trước khi mở Mini App.'}); return
     tg('sendMessage',{'chat_id':chat_id,'text':'🎉 Bạn đã mở khóa Mini App!','reply_markup':{'inline_keyboard':[[{'text':'🚀 MỞ MINI APP','web_app':{'url':WEBAPP_URL}}]]}})
 
 
@@ -376,7 +392,7 @@ def send_referral_gate(chat_id,uid):
     with db() as con: row=con.execute('SELECT points FROM users WHERE user_id=?',(uid,)).fetchone()
     points=int(row['points'] if row else 0)
     link=referral_link(uid)
-    text=f'🎁 MỜI BẠN BÈ NHẬN ĐIỂM\n\nMỗi người bạn mới vào bot qua link của bạn: +10 điểm.\nĐủ 40 điểm có thể đổi 1 key.\n\n💎 Điểm hiện tại: {points}/40\n🔗 Link mời bạn bè: {link or "Không lấy được link bot, hãy kiểm tra BOT_TOKEN."}'
+    text=f'🎁 MỜI BẠN BÈ NHẬN ĐIỂM\n\nMỗi người bạn mới vào bot qua link của bạn: +10 điểm.\nĐủ 30 điểm có thể đổi 1 key.\n\n💎 Điểm hiện tại: {points}/30\n🔗 Link mời bạn bè: {link or "Không lấy được link bot, hãy kiểm tra BOT_TOKEN."}'
     params={'chat_id':chat_id,'text':text}
     if link: params['reply_markup']={'inline_keyboard':[[{'text':'📋 SAO CHÉP LINK MỜI','copy_text':{'text':link}}]]}
     try: tg('sendMessage',params)
@@ -532,10 +548,11 @@ def process_update(update):
         }
         action=menu_actions.get(text.upper())
         if action:
+            missing=refresh_membership(uid)
             with db() as con:
                 state=con.execute('SELECT groups_verified FROM users WHERE user_id=?',(uid,)).fetchone()
-            if not state or not state['groups_verified']:
-                send_prompt(m['chat']['id']); return
+            if missing or not state or not state['groups_verified']:
+                send_prompt(m['chat']['id'],uid=uid); return
             if action=='account': send_account(m['chat']['id'],uid)
             elif action=='invite': send_referral_gate(m['chat']['id'],uid)
             else: send_top(m['chat']['id'])
@@ -545,13 +562,17 @@ def process_update(update):
             upsert_user(user,ref)
             send_optional_links(m['chat']['id'])
             if uid in ADMIN_IDS: send_app_button(m['chat']['id']); return
+            if uid in ADMIN_IDS:
+                send_app_button(m['chat']['id']); return
+            missing=refresh_membership(uid)
             with db() as con:
                 state=con.execute('SELECT groups_verified FROM users WHERE user_id=?',(uid,)).fetchone()
-            if state and state['groups_verified']:
-                if token == 'invite_menu': send_referral_gate(m['chat']['id'],uid)
-                else: main_menu(m['chat']['id'])
+            if missing or not state or not state['groups_verified']:
+                send_prompt(m['chat']['id'],uid=uid)
+            elif token == 'invite_menu':
+                send_referral_gate(m['chat']['id'],uid)
             else:
-                send_prompt(m['chat']['id'])
+                main_menu(m['chat']['id'])
             return
     c=update.get('callback_query')
     if not c: return
@@ -564,10 +585,13 @@ def process_update(update):
         upsert_user(user)
         if uid in ADMIN_IDS:
             tg('answerCallbackQuery',{'callback_query_id':c['id'],'text':'Admin được cấp quyền.'}); send_app_button(chat); return
+        with MEMBER_CACHE_LOCK:
+            for cache_key in list(MEMBER_CACHE):
+                if cache_key[0] == uid: MEMBER_CACHE.pop(cache_key,None)
         missing=missing_groups(uid)
         if missing:
             tg('answerCallbackQuery',{'callback_query_id':c['id'],'text':'Bạn chưa tham gia đủ nhóm/kênh bắt buộc.','show_alert':True})
-            send_prompt(chat); return
+            send_prompt(chat,uid=uid); return
         with db() as con: con.execute('UPDATE users SET groups_verified=1,unlocked=1 WHERE user_id=?',(uid,))
         qualify_referral(uid)
         tg('answerCallbackQuery',{'callback_query_id':c['id'],'text':'Xác minh thành công!'})
@@ -682,10 +706,16 @@ def access_check(raw):
     if uid not in ADMIN_IDS and maintenance_enabled():
         return None,({'ok':False,'reason':'maintenance','message':'🛠 Bot đang bảo trì, hãy quay lại sau nhé.'},503)
     if uid not in ADMIN_IDS:
-        with db() as con: row=con.execute('SELECT unlocked,skip_invite,groups_verified FROM users WHERE user_id=?',(uid,)).fetchone()
-        if not row or not row['groups_verified']:
-            return None,({'ok':False,'reason':'not_verified','message':'Bạn cần tham gia đủ nhóm và xác minh trong bot Telegram trước khi mở Mini App.'},403)
-        with db() as con: con.execute('UPDATE users SET unlocked=1 WHERE user_id=?',(uid,))
+        with db() as con:
+            row=con.execute('SELECT unlocked,skip_invite,groups_verified FROM users WHERE user_id=?',(uid,)).fetchone()
+        if not row:
+            return None,({'ok':False,'reason':'not_verified','message':'Hãy nhấn Start trong bot, tham gia đủ nhóm/kênh rồi xác minh.'},403)
+        missing=refresh_membership(uid)
+        with db() as con:
+            verified=con.execute('SELECT groups_verified FROM users WHERE user_id=?',(uid,)).fetchone()
+        if missing or not verified or not verified['groups_verified']:
+            message=('Bạn đã rời hoặc chưa tham gia đủ nhóm/kênh.' if missing else 'Bạn chưa xác minh nhóm/kênh trong bot.')
+            return None,({'ok':False,'reason':'not_verified','message':message+' Hãy nhấn Start trong bot, tham gia các nhóm còn thiếu rồi nhấn XÁC MINH.', 'missing_groups':[{'title':g['title'],'url':g['url']} for g in missing],'bot_start_url':('https://t.me/'+bot_username()) if bot_username() else ''},403)
     return user,None
 
 
@@ -735,7 +765,7 @@ def api_access():
             today_inv=con.execute("SELECT COUNT(*) FROM referrals WHERE referrer_id=? AND date(qualified_at)=date('now')",(uid,)).fetchone()[0]
             today_claim=con.execute("SELECT COUNT(*) FROM claims WHERE user_id=? AND date(claimed_at)=date('now')",(uid,)).fetchone()[0]
             used=con.execute("SELECT COUNT(*) FROM (SELECT claimed_at FROM claims WHERE user_id=? ORDER BY id DESC LIMIT 2) q WHERE datetime(claimed_at)>=datetime('now','-24 hours')",(uid,)).fetchone()[0]
-    return jsonify(ok=True,admin=uid in ADMIN_IDS,points=int(points_row['points'] if points_row else 0),referral_count=referral_count(uid),today_invites=today_inv,today_claims=today_claim,claims_remaining=max(0,2-min(2,int(used))),points_per_invite=10,claim_cost=40,referral_link=referral_link(uid),profile={'id':uid,'first_name':user.get('first_name',''),'last_name':user.get('last_name',''),'username':user.get('username',''),'photo_url':user.get('photo_url','')})
+    return jsonify(ok=True,admin=uid in ADMIN_IDS,points=int(points_row['points'] if points_row else 0),referral_count=referral_count(uid),today_invites=today_inv,today_claims=today_claim,claims_remaining=max(0,2-min(2,int(used))),points_per_invite=10,claim_cost=30,referral_link=referral_link(uid),profile={'id':uid,'first_name':user.get('first_name',''),'last_name':user.get('last_name',''),'username':user.get('username',''),'photo_url':user.get('photo_url','')})
 
 @app.post('/api/admin/users')
 @api_rate_limit
@@ -886,8 +916,8 @@ def api_claim():
                 else:
                     balance_row=con.execute('SELECT points FROM users WHERE user_id=?',(uid,)).fetchone()
                 balance=int(balance_row['points'] if balance_row else 0)
-                if balance < 40: return jsonify(ok=False,message=f'Bạn cần 40 điểm để đổi key. Hiện có {balance} điểm, còn thiếu {40-balance} điểm.'),403
-                con.execute('UPDATE users SET points=points-40 WHERE user_id=?',(uid,))
+                if balance < 30: return jsonify(ok=False,message=f'Bạn cần 30 điểm để đổi key. Hiện có {balance} điểm, còn thiếu {30-balance} điểm.'),403
+                con.execute('UPDATE users SET points=points-30 WHERE user_id=?',(uid,))
             con.execute('DELETE FROM keys_stock WHERE id=?',(key['id'],))
             con.execute('INSERT INTO claims(user_id,product_id,product_name,key_value) VALUES(?,?,?,?)',(uid,pid,p['name'],key['key_value']))
             balance=0

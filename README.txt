@@ -25,7 +25,7 @@ TELEGRAM SETUP
 2. Admin mở /admin → “Thêm nhóm/kênh bắt buộc” → gửi trực tiếp link công khai dạng https://t.me/ten_nhom. Bot tự lấy chat ID và tên bằng getChat. Bot phải được thêm làm quản trị viên để xác minh thành viên. Link mời riêng tư dạng t.me/+... không thể tự suy ra chat ID chỉ từ link; hãy dùng username công khai của nhóm/kênh.
 3. Set WEBAPP_URL to this service's public HTTPS URL.
 4. Ensure the bot is not running in another polling worker/service. bot.py removes the previous webhook automatically.
-5. Use /start, join all listed groups and press XÁC MINH. Each new referred account is counted once when they first start the bot. Every successful invite awards 10 points; 40 points can be exchanged for one key. Referral attribution is stored once and cannot be changed later.
+5. Use /start, join all listed groups and press XÁC MINH. Each new referred account is counted once when they first start the bot. Every successful invite awards 10 points; 30 points can be exchanged for one key. Referral attribution is stored once and cannot be changed later.
 
 ADMIN COMMANDS (ADMIN_IDS ONLY)
 /admin
@@ -40,7 +40,7 @@ The admin menu has a separate one-tap “Thêm bot/nhóm bên ngoài” action a
 MINI APP
 - On bot startup, the polling worker calls Telegram setChatMenuButton to configure a persistent “Mở Mini App” button beside the message composer in private chats. WEBAPP_URL must be a valid HTTPS Mini App URL.
 - After group verification, the referral URL is shown as plain text and a native “SAO CHÉP LINK MỜI” button is provided when supported by Telegram.
-The existing visual design is retained. Product catalogue, key stock and claims now use server APIs and the shared database. Claims remove a key atomically on the server, with a maximum of two claims per Telegram account in a rolling 24-hour window (except ADMIN_IDS). Claim history is server-side and grouped by product. Direct access is rejected unless Telegram initData is valid and the user has started the bot. Required-group verification and the old 3-invite gate are disabled. Each key claim costs 40 points, and users may claim at most two keys in a rolling 24-hour window (except ADMIN_IDS).
+The existing visual design is retained. Product catalogue, key stock and claims now use server APIs and the shared database. Claims remove a key atomically on the server, with a maximum of two claims per Telegram account in a rolling 24-hour window (except ADMIN_IDS). Claim history is server-side and grouped by product. Direct access is rejected unless Telegram initData is valid and the user has started the bot. Required-group verification and the old 3-invite gate are disabled. Each key claim costs 30 points, and users may claim at most two keys in a rolling 24-hour window (except ADMIN_IDS).
 
 IMPORTANT MIGRATION NOTES
 - PostgreSQL is selected automatically when DATABASE_URL is set. The application initializes its tables and indexes on startup; do not create a local data/ directory or jinny.db file for Supabase.
@@ -68,3 +68,11 @@ LOAD / ABUSE CONTROLS
 - Bot update processing uses 12 concurrent workers, preserves ordering per Telegram user, and applies a bounded queue (512 pending updates). Gunicorn uses 2 workers × 12 threads to balance concurrency and memory usage.
 - For a deployment serving 1,000–2,000 registered accounts, use PostgreSQL (DATABASE_URL), a Render instance with enough CPU/RAM, and only one bot polling worker for the token. This is a configuration target, not a guarantee of 1,000–2,000 simultaneous requests; actual capacity depends on hosting resources, Telegram API limits, database latency and traffic bursts. Do not use SQLite for a multi-worker production deployment.
 - Multi-account detection cannot reliably prove distinct real-world people from Telegram IDs alone. IP/device fingerprint collection is intentionally not enabled; rate limits and referral uniqueness reduce automated abuse without storing sensitive tracking data.
+
+
+GROUP MEMBERSHIP RE-CHECK
+- Every Mini App API request re-checks membership in all required Telegram groups/channels. Leaving a required group/channel revokes access immediately on the next request.
+- Reopen the bot with /start to see only the groups/channels still missing, join them, then press XÁC MINH.
+- The Mini App displays the missing group links and a button to open the bot's Start conversation.
+- Mini App fetch requests use AbortController timeout for older Telegram WebViews that do not implement AbortSignal.timeout().
+- Non-admin users retain the existing limit of two key claims per rolling 24 hours.
