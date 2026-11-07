@@ -936,7 +936,17 @@ def api_claim_history():
         rows=con.execute('SELECT product_id AS productId,product_name AS productName,key_value AS key,claimed_at AS claimedAt FROM claims WHERE user_id=? ORDER BY id DESC LIMIT 200',(int(user['id']),)).fetchall()
     return jsonify(ok=True,claims=[dict(x) for x in rows])
 
+@app.errorhandler(404)
+def handle_not_found(error):
+    # Keep API failures machine-readable; never let the frontend parse an HTML 404 page as JSON.
+    if request.path.startswith('/api/'):
+        return jsonify(ok=False, message='Không tìm thấy API: '+request.path), 404
+    return error
+
 @app.get('/<path:filename>')
-def assets(filename): return send_from_directory(BASE_DIR,filename)
+def assets(filename):
+    if filename.startswith('api/'):
+        return jsonify(ok=False, message='Không tìm thấy API: /'+filename), 404
+    return send_from_directory(BASE_DIR,filename)
 
 if __name__=='__main__': app.run(host='0.0.0.0',port=int(os.getenv('PORT','3000')))

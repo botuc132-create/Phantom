@@ -51,7 +51,38 @@ body{background:radial-gradient(ellipse at 12% 0%,#153e68 0,transparent 42%),rad
 const tgApp=window.Telegram?.WebApp;
 if(tgApp){tgApp.ready();tgApp.expand();}
 const initData=()=>tgApp?.initData||'';
-const api=async(path,payload={})=>{const r=await fetch(path,{method:'POST',cache:'no-store',headers:{'Content-Type':'application/json'},body:JSON.stringify({...payload,initData:initData()}),signal:(()=>{const c=new AbortController();setTimeout(()=>c.abort(),20000);return c.signal})()});const d=await r.json();if(!r.ok||!d.ok){const e=new Error(d.message||'Yêu cầu không thành công');e.data=d;throw e}return d};
+const api=async(path,payload={})=>{
+  const controller=new AbortController();
+  const timeout=setTimeout(()=>controller.abort(),20000);
+  let response;
+  try {
+    response=await fetch(new URL(path,window.location.origin).toString(),{
+      method:'POST',cache:'no-store',
+      headers:{'Content-Type':'application/json','Accept':'application/json'},
+      body:JSON.stringify({...payload,initData:initData()}),
+      signal:controller.signal
+    });
+  } catch(err) {
+    if(err.name==='AbortError') throw new Error('Máy chủ phản hồi quá lâu. Vui lòng thử lại.');
+    throw new Error('Không thể kết nối máy chủ Mini App. Hãy kiểm tra kết nối mạng hoặc cấu hình dịch vụ.');
+  } finally { clearTimeout(timeout); }
+  const contentType=(response.headers.get('content-type')||'').toLowerCase();
+  const raw=await response.text();
+  let data;
+  if(contentType.includes('application/json')) {
+    try { data=JSON.parse(raw); }
+    catch(_) { throw new Error('Máy chủ trả về JSON không hợp lệ. Vui lòng kiểm tra log dịch vụ.'); }
+  } else {
+    const isHtml=/^\s*(<!doctype\s+html|<html[\s>])/i.test(raw);
+    if(isHtml) throw new Error('API Mini App đang trả về trang HTML thay vì JSON. Hãy triển khai main.py cùng index.html trên cùng dịch vụ web và đặt WEBAPP_URL trỏ đúng URL dịch vụ đó.');
+    throw new Error('Máy chủ trả về dữ liệu không đúng định dạng (HTTP '+response.status+').');
+  }
+  if(!response.ok||!data.ok) {
+    const err=new Error(data.message||data.error||('Yêu cầu thất bại (HTTP '+response.status+').'));
+    err.data=data; throw err;
+  }
+  return data;
+};
 function syncTelegramProfile(){const u=tgApp?.initDataUnsafe?.user;const name=document.getElementById('tgName'),id=document.getElementById('tgId'),avatar=document.getElementById('tgAvatar');if(!u){name.textContent='Người dùng Telegram';id.textContent='Hãy mở Mini App trong Telegram';return}name.textContent=[u.first_name,u.last_name].filter(Boolean).join(' ')||(u.username?'@'+u.username:'Người dùng Telegram');id.textContent='ID: '+u.id;if(u.photo_url){const img=document.createElement('img');img.src=u.photo_url;img.alt='Avatar Telegram';avatar.replaceChildren(img)}}
 syncTelegramProfile();
 let accessAllowed=false,isAdmin=false,products=[],visitorClaims=[],legacyChecked=false,pointsBalance=0,referralBotLink='';
